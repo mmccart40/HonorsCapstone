@@ -10,6 +10,8 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.metrics import classification_report
+from sklearn.ensemble import RandomForestClassifier
+
 
 
 # 1. Load the dataset. Each athlete is identified by athlete_id
@@ -26,6 +28,8 @@ for athlete_id in df['athlete_id'].unique():
     # Forward fill and then back fill
     athlete_df = athlete_df.ffill().bfill()
     filled_dfs.append(athlete_df)
+
+
 
 # Combine all athletes back into a single DataFrame
 # reset index for duplicated indices (dont think theres any duplicates
@@ -52,6 +56,30 @@ cols_to_normalize = [
 ]
 
 df_norm = df_filled.copy()
+
+# -----------------------------
+# Feature engineering (AFTER df_norm exists)
+# -----------------------------
+
+# Acute - chronic difference
+df_norm['ac_diff'] = (
+    df_norm['acute_load_7d'] - df_norm['chronic_load_28d']
+)
+
+# Load spike indicator
+df_norm['load_spike'] = (
+    df_norm['acute_load_7d'] >
+    1.3 * df_norm['chronic_load_28d']
+).astype(int)
+
+# 7-day sleep trend (per athlete)
+df_norm['sleep_trend_7d'] = (
+    df_norm
+    .groupby('athlete_id')['sleep_hours']
+    .diff(7)
+    .fillna(0)
+)
+
 
 # Normalize using Min-Max per athlete so that variables are on a common
 # scale of 0-1. Differences in athletes do not dominate correlations
@@ -125,33 +153,71 @@ plt.title('Correlation Analysis: Wellness and Training Load Metrics')
 plt.tight_layout()
 plt.show()
 
-# Define target variable
+# Define target variable, binary target
 target = 'injury_in_next_7d' # 0 = no injury, 1 = injury
 
 # Define features
-features = wellness_vars + training_load_vars
+# Use selected wellness and training load variables as predictors
+features = (
+    wellness_vars + 
+    training_load_vars +
+    ['ac_diff', 'load_spike', 'sleep_trend_7d']
+)
+
 X = df_norm[features]
 y = df_norm[target]
 
+# Stratified split preserves injury /  no-injury ratio in train
+# and test sets
 X_train, X_test, y_train, y_test = train_test_split(
     X, y,
     test_size=0.2,
     random_state=42,
-    stratify=y
+    stratify=y # So the training set and test set have same injury proportion
 )
 
 # Baseline logistic regression
+# - class_weight = 'balanced' to handle class imbalance
+# - higher max_iter to ensure convergence
 log_model = LogisticRegression(
-    max_iter=1000,
-    class_weight='balanced',
-    solver='liblinear'
+    max_iter=2000,
+    class_weight={0:1, 1:5},
+    solver='liblinear',
+    C=0.7
 )
+
 log_model.fit(X_train, y_train)
 
+# Predict probabilities for the positive class (injury = 1)
 y_prob_log = log_model.predict_proba(X_test)[:, 1]
-threshold = 0.30
+threshold = 0.40
 y_pred_log = (y_prob_log >= threshold).astype(int)
 
+# Evaluate model performance at several fixed thresholds
+# to understand precision-recall tradeoffs
+thresholds = [0.1, 0.2, 0.3, 0.4, 0.5]
+
+for t in thresholds:
+    y_pred_t = (y_prob_log >= t).astype(int)
+    
+    print(f"\nThreshold = {t}")
+    print(confusion_matrix(y_test, y_pred_t))
+    print(classification_report(y_test, y_pred_t, zero_division=0))
+
+# Search for the threshold that maximizes F1 score
+best_t = 0.4
+best_f1 = 0
+
+for t in np.arange(0.1, 0.9, 0.05):
+    y_pred_t = (y_prob_log >= t).astype(int)
+    f1 = f1_score(y_test, y_pred_t, zero_division=0)
+    
+    if f1 > best_f1:
+        best_f1 = f1
+        best_t = t
+
+print(f"Best threshold: {best_t:.2f}")
+print(f"Best F1 score: {best_f1:.3f}")
 
 # Decision tree
 dt_model = DecisionTreeClassifier(
@@ -163,9 +229,31 @@ dt_model = DecisionTreeClassifier(
     random_state=42
 )
 
-
 dt_model.fit(X_train, y_train)
 y_pred_dt = dt_model.predict(X_test)
+
+# Random Forest
+rf_model = RandomForestClassifier(
+    n_estimators=500,
+    max_depth=6,
+    min_samples_leaf=20,
+    min_samples_split=60,
+    max_features='sqrt',
+    class_weight='balanced_subsample',
+    random_state=42,
+    n_jobs=-1
+)
+
+
+rf_model.fit(X_train, y_train)
+y_prob_rf = rf_model.predict_proba(X_test)[:, 1]
+threshold = 0.30
+y_pred_rf = (y_prob_rf >= threshold).astype(int)
+
+cm_rf = confusion_matrix(y_test, y_pred_rf)
+print("Random Forest Confusion Matrix:")
+print(cm_rf)
+
 
 # Confusion Matrix
 cm_log = confusion_matrix(y_test, y_pred_log)
@@ -176,6 +264,9 @@ print(classification_report(y_test, y_pred_log, zero_division=0))
 
 print("\nDecision Tree Classification Report:")
 print(classification_report(y_test, y_pred_dt))
+
+print("\nRandom Forest Classification Report:")
+print(classification_report(y_test, y_pred_rf, zero_division=0))
 
 
 def evaluate(y_true, y_pred):
@@ -188,7 +279,8 @@ def evaluate(y_true, y_pred):
 
 results = {
     'Logistic Regression': evaluate(y_test, y_pred_log),
-    'Decision Tree': evaluate(y_test, y_pred_dt)
+    'Decision Tree': evaluate(y_test, y_pred_dt),
+    'Random Forest': evaluate(y_test, y_pred_rf)
 }
 
 results_df = pd.DataFrame(results).T
