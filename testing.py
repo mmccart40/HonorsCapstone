@@ -1,3 +1,4 @@
+import torch.nn as nn
 import pandas as pd
 import numpy as np
 # For correlation matrix
@@ -11,6 +12,7 @@ from sklearn.metrics import confusion_matrix
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.metrics import classification_report
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import MinMaxScaler
 
 
 
@@ -52,7 +54,9 @@ cols_to_normalize = [
     'acwr',
     'monotony_7d',
     'poor_sleep_7d',
-    'days_since_last_injury_start'
+    'days_since_last_injury_start',
+    'ac_diff',              
+    'sleep_trend_7d'        
 ]
 
 df_norm = df_filled.copy()
@@ -84,6 +88,7 @@ df_norm['sleep_trend_7d'] = (
 # Normalize using Min-Max per athlete so that variables are on a common
 # scale of 0-1. Differences in athletes do not dominate correlations
 
+'''
 for athlete_id in df_norm['athlete_id'].unique():
     mask = df_norm['athlete_id'] == athlete_id
     
@@ -98,6 +103,7 @@ for athlete_id in df_norm['athlete_id'].unique():
             ) / (max_val - min_val)
         else:
             df_norm.loc[mask, col] = 0
+'''
 
 wellness_vars = [
     'sleep_hours',
@@ -115,43 +121,12 @@ training_load_vars = [
 ]
 
 # Create a subset using only variables we are interested in
+'''
 corr_df = df_norm[wellness_vars + training_load_vars]
 corr_matrix = corr_df.corr()
-
-# Plot the correlation heatmap
-plt.figure(figsize=(10, 8))
-im = plt.imshow(corr_matrix, vmin=-1, vmax=1)
-plt.colorbar(im, label='Correlation Coefficient')
-
-plt.xticks(
-    ticks=np.arange(len(corr_matrix.columns)),
-    labels=corr_matrix.columns,
-    rotation=90
-)
+'''
 
 
-plt.yticks(
-    ticks=np.arange(len(corr_matrix.columns)),
-    labels=corr_matrix.columns
-)
-
-# Add correlation values inside each cell
-for i in range(len(corr_matrix.columns)):
-    for j in range(len(corr_matrix.columns)):
-        value = corr_matrix.iloc[j, i]
-        plt.text(
-            i, j,
-            f"{value:.2f}",
-            ha='center',
-            va='center',
-            color='white' if abs(value) > 0.5 else 'black',
-            fontsize=8
-        )
-
-
-plt.title('Correlation Analysis: Wellness and Training Load Metrics')
-plt.tight_layout()
-plt.show()
 
 # Define target variable, binary target
 target = 'injury_in_next_7d' # 0 = no injury, 1 = injury
@@ -176,17 +151,83 @@ X_train, X_test, y_train, y_test = train_test_split(
     stratify=y # So the training set and test set have same injury proportion
 )
 
+
+# Only scale numeric continuous variables
+scaler = MinMaxScaler()
+
+X_train = X_train.copy()
+X_test = X_test.copy()
+
+cols_to_scale = [col for col in cols_to_normalize if col in X_train.columns]
+
+X_train.loc[:, cols_to_scale] = scaler.fit_transform(
+    X_train[cols_to_scale]
+)
+
+X_test.loc[:, cols_to_scale] = scaler.transform(
+    X_test[cols_to_scale]
+)
+
+print(X_train[cols_to_scale].describe())
+
+
+corr_df = X_train[wellness_vars + training_load_vars]
+corr_matrix = corr_df.corr()
+
+# Plot the correlation heatmap
+plt.figure(figsize=(10, 8))
+im = plt.imshow(corr_matrix, vmin=-1, vmax=1)
+plt.colorbar(im, label='Correlation Coefficient')
+
+plt.xticks(
+    ticks=np.arange(len(corr_matrix.columns)),
+    labels=corr_matrix.columns,
+    rotation=90
+)
+
+plt.yticks(
+    ticks=np.arange(len(corr_matrix.columns)),
+    labels=corr_matrix.columns
+)
+
+# Add correlation values inside each cell
+for i in range(len(corr_matrix.columns)):
+    for j in range(len(corr_matrix.columns)):
+        value = corr_matrix.iloc[j, i]
+        plt.text(
+            i, j,
+            f"{value:.2f}",
+            ha='center',
+            va='center',
+            color='white' if abs(value) > 0.5 else 'black',
+            fontsize=8
+        )
+
+
+plt.title('Correlation Analysis: Wellness and Training Load Metrics')
+plt.tight_layout()
+plt.show()
+
 # Baseline logistic regression
 # - class_weight = 'balanced' to handle class imbalance
 # - higher max_iter to ensure convergence
 log_model = LogisticRegression(
     max_iter=2000,
-    class_weight={0:1, 1:5},
+    class_weight={0:1, 1:5.5},
     solver='liblinear',
     C=0.7
 )
 
+
 log_model.fit(X_train, y_train)
+
+#LOG MODEL TWO
+log_model2 = nn.Sequential(
+    nn.Linear(10, 1),
+    nn.Sigmoid()
+)
+
+
 
 # Predict probabilities for the positive class (injury = 1)
 y_prob_log = log_model.predict_proba(X_test)[:, 1]
