@@ -1,4 +1,6 @@
 import torch.nn as nn
+import torch.optim as optim
+import torch
 import pandas as pd
 import numpy as np
 # For correlation matrix
@@ -222,10 +224,64 @@ log_model = LogisticRegression(
 log_model.fit(X_train, y_train)
 
 #LOG MODEL TWO
+# TODO: Change the 12 to read the number of features - DO NOT KEEP HARDCODED
 log_model2 = nn.Sequential(
-    nn.Linear(10, 1),
+    nn.Linear(12, 1),
     nn.Sigmoid()
 )
+
+# Convert data to tensors
+X_tensor = torch.FloatTensor(X_train[features].values)
+y_tensor = torch.FloatTensor(y_train.values).unsqueeze(1)
+
+# Setup
+loss_fn = nn.BCELoss()              # Binary cross-entropy — same as logistic regression
+optimizer = optim.Adam(log_model2.parameters(), lr=0.001)
+
+# Train
+for epoch in range(2000):
+    y_pred = log_model2(X_tensor)
+    loss = loss_fn(y_pred, y_tensor)
+
+    optimizer.zero_grad()
+    loss.backward()                  # This is backpropagation — computes gradients
+    optimizer.step()                 # This updates the weights
+
+    if epoch % 20 == 0:
+        print(f"Epoch {epoch}, Loss: {loss.item():.4f}")
+
+#SIMPLE NEURAL NET
+# TODO: Change the 12 to read the number of features - DO NOT KEEP HARDCODED
+firstNN = nn.Sequential(
+    nn.Linear(12, 1000),
+    nn.ReLU(),
+    nn.Linear(1000,1000),
+    nn.Tanh(),
+    nn.Linear(1000,1),
+    nn.Sigmoid()
+)
+
+# Convert data to tensors
+X_tensor = torch.FloatTensor(X_train[features].values)
+y_tensor = torch.FloatTensor(y_train.values).unsqueeze(1)
+
+# Setup
+loss_fn = nn.BCELoss()              # Binary cross-entropy — same as logistic regression
+optimizer = optim.Adam(firstNN.parameters(), lr=0.001)
+
+# Train
+for epoch in range(1000):
+    y_pred = firstNN(X_tensor)
+    loss = loss_fn(y_pred, y_tensor)
+
+    optimizer.zero_grad()
+    loss.backward()                  # This is backpropagation — computes gradients
+    optimizer.step()                 # This updates the weights
+
+    if epoch % 20 == 0:
+        print(f"Epoch {epoch}, Loss: {loss.item():.4f}")
+
+
 
 
 
