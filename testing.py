@@ -370,7 +370,7 @@ model_D = nn.Sequential(
 )
 
 model_E = nn.Sequential(
-    nn.Linear(input_dim, 128),
+    nn.Linear(num_features, 128),
     nn.ReLU(),
     nn.BatchNorm1d(128),
     nn.Dropout(0.3),
