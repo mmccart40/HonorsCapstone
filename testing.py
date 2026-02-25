@@ -387,25 +387,40 @@ model_E = nn.Sequential(
 X_tensor = torch.FloatTensor(X_train[features].values)
 y_tensor = torch.FloatTensor(y_train.values).unsqueeze(1)
 
-pos_weight_value = 5.5/1
-pos_weight = torch.tensor([pos_weight_value], dtype=torch.float32)
-loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+def train_model(model):
+    pos_weight_value = 6.5 / 1
+    pos_weight = torch.tensor([pos_weight_value], dtype=torch.float32)
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    #loss_fn = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-# Setup
-#loss_fn = nn.BCELoss()              # Binary cross-entropy — same as logistic regression
-optimizer = optim.Adam(firstNN.parameters(), lr=0.001)
+    for epoch in range(1000):
+        y_pred = model(X_tensor)
+        loss = loss_fn(y_pred, y_tensor)
 
-# Train
-for epoch in range(1000):
-    y_pred = firstNN(X_tensor)
-    loss = loss_fn(y_pred, y_tensor)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-    optimizer.zero_grad()
-    loss.backward()                  # This is backpropagation — computes gradients
-    optimizer.step()                 # This updates the weights
+        if epoch % 20 == 0:
+            print(f"Epoch {epoch}, Loss: {loss.item():.4f}")
 
-    if epoch % 20 == 0:
-        print(f"Epoch {epoch}, Loss: {loss.item():.4f}")
+    return model
+
+# Train all neural nets
+firstNN = train_model(firstNN)
+model_A = train_model(model_A)
+model_B = train_model(model_B)
+model_C = train_model(model_C)
+model_D = train_model(model_D)
+model_E = train_model(model_E)
+
+
+
+
+
+
+
 
 
 
@@ -483,32 +498,7 @@ print("\nRandom Forest Classification Report:")
 print(classification_report(y_test, y_pred_rf, zero_division=0))
 '''
 
-def train_model(model):
-    pos_weight_value = 6.5 / 1
-    pos_weight = torch.tensor([pos_weight_value], dtype=torch.float32)
-    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    #loss_fn = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    for epoch in range(1000):
-        y_pred = model(X_tensor)
-        loss = loss_fn(y_pred, y_tensor)
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        if epoch % 20 == 0:
-            print(f"Epoch {epoch}, Loss: {loss.item():.4f}")
-
-    return model
-
-# Train all neural nets
-model_A = train_model(model_A)
-model_B = train_model(model_B)
-model_C = train_model(model_C)
-model_D = train_model(model_D)
-model_E = train_model(model_E)
 
 def evaluate(y_true, y_pred):
     return {
