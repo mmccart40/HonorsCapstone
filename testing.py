@@ -387,8 +387,12 @@ model_E = nn.Sequential(
 X_tensor = torch.FloatTensor(X_train[features].values)
 y_tensor = torch.FloatTensor(y_train.values).unsqueeze(1)
 
+pos_weight_value = 5.5/1
+pos_weight = torch.tensor([pos_weight_value], dtype=torch.float32)
+loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
 # Setup
-loss_fn = nn.BCELoss()              # Binary cross-entropy — same as logistic regression
+#loss_fn = nn.BCELoss()              # Binary cross-entropy — same as logistic regression
 optimizer = optim.Adam(firstNN.parameters(), lr=0.001)
 
 # Train
@@ -480,8 +484,10 @@ print(classification_report(y_test, y_pred_rf, zero_division=0))
 '''
 
 def train_model(model):
-
-    loss_fn = nn.BCELoss()
+    pos_weight_value = 6.5 / 1
+    pos_weight = torch.tensor([pos_weight_value], dtype=torch.float32)
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    #loss_fn = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     for epoch in range(1000):
