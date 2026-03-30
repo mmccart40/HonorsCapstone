@@ -1,87 +1,84 @@
 import os
+import gc
 import pandas as pd
 
-# =========================================================
-# ACES SAFE CONFIG
-# =========================================================
+# ----------------------------
+# CONFIG
+# ----------------------------
+DATA_FOLDER = "objective-TeamB-2020"
 
-ROOT_PATH = "/scratch/user/u.mm342941/objective-TeamB-2020/2020"
+# If you only need specific columns, add them here to reduce memory
+# Example:
+# USE_COLS = ["athlete_id", "date", "load"]
+USE_COLS = None
 
-print("Root path:", ROOT_PATH)
-print("Exists:", os.path.exists(ROOT_PATH))
 
-if not os.path.exists(ROOT_PATH):
-    raise FileNotFoundError(f"Dataset path not found: {ROOT_PATH}")
+# ----------------------------
+# LOAD FILE LIST
+# ----------------------------
+files = [f for f in os.listdir(DATA_FOLDER) if f.endswith(".parquet")]
 
-# =========================================================
-# STORAGE (SMALL FOOTPRINT)
-# =========================================================
+print(f"Found {len(files)} files")
 
-processed_files = 0
-failed_files = 0
 
-output_path = os.path.join(ROOT_PATH, "TeamB_2020_combined.parquet")
+# ----------------------------
+# PROCESS EACH FILE SAFELY
+# ----------------------------
+def process(df):
+    """
+    Replace this function with your real pipeline logic.
+    Keep it memory-light.
+    """
 
-# Remove old output if exists (avoids appending issues)
-if os.path.exists(output_path):
-    os.remove(output_path)
+    # Example safe operations (no big copies)
+    print("Shape:", df.shape)
 
-first_write = True
+    # Example aggregation (replace with your model logic)
+    if "athlete_id" in df.columns:
+        return df.groupby("athlete_id").size()
 
-# =========================================================
-# STREAMING PARQUET PROCESSING (NO OOM)
-# =========================================================
+    return None
 
-for dirpath, dirnames, filenames in os.walk(ROOT_PATH):
 
-    for file in filenames:
+results = []
 
-        if not file.endswith(".parquet"):
-            continue
+for i, file in enumerate(files):
+    file_path = os.path.join(DATA_FOLDER, file)
+    print(f"\n[{i+1}/{len(files)}] Loading {file_path}")
 
-        file_path = os.path.join(dirpath, file)
-        print("Loading:", file_path)
+    # ----------------------------
+    # MEMORY-SAFE LOADING
+    # ----------------------------
+    if USE_COLS:
+        df = pd.read_parquet(file_path, columns=USE_COLS)
+    else:
+        df = pd.read_parquet(file_path)
 
-        try:
-            # -------------------------------------------------
-            # Read parquet (optionally reduce memory here)
-            # -------------------------------------------------
-            df = pd.read_parquet(file_path)
+    # ----------------------------
+    # PROCESS IMMEDIATELY (NO STORAGE OF FULL DATAFRAMES)
+    # ----------------------------
+    result = process(df)
 
-            # -------------------------------------------------
-            # Extract date from folder name
-            # -------------------------------------------------
-            date_str = os.path.basename(dirpath)
-            df["date"] = pd.to_datetime(date_str, errors="coerce")
+    if result is not None:
+        results.append(result)
 
-            # -------------------------------------------------
-            # STREAM WRITE (prevents RAM explosion)
-            # -------------------------------------------------
-            df.to_parquet(
-                output_path,
-                engine="pyarrow",
-                index=False,
-                append=not first_write
-            )
-            first_write = False
+    # ----------------------------
+    # HARD MEMORY CLEANUP
+    # ----------------------------
+    del df
+    gc.collect()
 
-            processed_files += 1
 
-            # Free memory immediately
-            del df
+# ----------------------------
+# FINAL COMBINATION (SAFE)
+# ----------------------------
+print("\nCombining results...")
 
-        except Exception as e:
-            print("Failed:", file_path)
-            print("Reason:", e)
-            failed_files += 1
+if results:
+    final_result = pd.concat(results)
+    print(final_result.head())
+else:
+    print("No results generated")
 
-# =========================================================
-# SUMMARY
-# =========================================================
 
-print("\n====================")
 print("DONE")
-print("Processed files:", processed_files)
-print("Failed files:", failed_files)
-print("Output saved to:", output_path)
-print("====================")
