@@ -3,14 +3,19 @@ import gc
 import pandas as pd
 
 # ----------------------------
-# CONFIG
+# FIXED DATA PATH (IMPORTANT)
 # ----------------------------
-DATA_FOLDER = "objective-TeamB-2020"
+DATA_FOLDER = "/scratch/user/u.mm342941/objective-TeamB-2020"
 
-# If you only need specific columns, add them here to reduce memory
-# Example:
-# USE_COLS = ["athlete_id", "date", "load"]
-USE_COLS = None
+# Optional: reduce memory if needed
+USE_COLS = None  # or ["athlete_id", "date"] if you know needed columns
+
+
+# ----------------------------
+# VALIDATE PATH EARLY (IMPORTANT DEBUG STEP)
+# ----------------------------
+if not os.path.exists(DATA_FOLDER):
+    raise FileNotFoundError(f"DATA_FOLDER not found: {DATA_FOLDER}")
 
 
 # ----------------------------
@@ -18,22 +23,21 @@ USE_COLS = None
 # ----------------------------
 files = [f for f in os.listdir(DATA_FOLDER) if f.endswith(".parquet")]
 
-print(f"Found {len(files)} files")
+print(f"Found {len(files)} parquet files")
 
 
 # ----------------------------
-# PROCESS EACH FILE SAFELY
+# PROCESS FUNCTION (SAFE PLACEHOLDER)
 # ----------------------------
 def process(df):
     """
-    Replace this function with your real pipeline logic.
-    Keep it memory-light.
+    Replace this with your actual model / feature engineering logic.
+    Must stay memory-light.
     """
 
-    # Example safe operations (no big copies)
-    print("Shape:", df.shape)
+    print("Processing shape:", df.shape)
 
-    # Example aggregation (replace with your model logic)
+    # Example lightweight operation
     if "athlete_id" in df.columns:
         return df.groupby("athlete_id").size()
 
@@ -42,35 +46,33 @@ def process(df):
 
 results = []
 
+
+# ----------------------------
+# MAIN LOOP (OOM SAFE)
+# ----------------------------
 for i, file in enumerate(files):
     file_path = os.path.join(DATA_FOLDER, file)
     print(f"\n[{i+1}/{len(files)}] Loading {file_path}")
 
-    # ----------------------------
-    # MEMORY-SAFE LOADING
-    # ----------------------------
+    # Load parquet safely
     if USE_COLS:
         df = pd.read_parquet(file_path, columns=USE_COLS)
     else:
         df = pd.read_parquet(file_path)
 
-    # ----------------------------
-    # PROCESS IMMEDIATELY (NO STORAGE OF FULL DATAFRAMES)
-    # ----------------------------
+    # Process immediately
     result = process(df)
 
     if result is not None:
         results.append(result)
 
-    # ----------------------------
-    # HARD MEMORY CLEANUP
-    # ----------------------------
+    # IMPORTANT: free memory
     del df
     gc.collect()
 
 
 # ----------------------------
-# FINAL COMBINATION (SAFE)
+# FINAL COMBINE
 # ----------------------------
 print("\nCombining results...")
 
@@ -79,6 +81,5 @@ if results:
     print(final_result.head())
 else:
     print("No results generated")
-
 
 print("DONE")
