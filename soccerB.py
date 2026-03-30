@@ -24,71 +24,64 @@ if len(files) == 0:
     exit()
 
 # ----------------------------
-# STEP 1: INSPECT ONE FILE
+# PROCESS FUNCTION (FIXED)
 # ----------------------------
-print("\n===== SAMPLE FILE INSPECTION =====")
+def process(df):
+    if "player_name" not in df.columns:
+        return None
 
-sample = pd.read_parquet(files[0])
-
-print("\nCOLUMNS:")
-print(sample.columns)
-
-print("\nFIRST 5 ROWS:")
-print(sample.head())
-
-print("\nDTYPES:")
-print(sample.dtypes)
+    return df.groupby("player_name").agg({
+        "speed": "mean",
+        "heart_rate": "mean",
+        "inst_acc_impulse": "mean",
+        "lat": "count"   # number of records
+    }).rename(columns={"lat": "num_samples"})
 
 # ----------------------------
-# STEP 2: LOAD ONE FULL DAY
+# MAIN LOOP
 # ----------------------------
-print("\n===== BUILDING ONE DAY SAMPLE =====")
+results = []
+bad_files = []
 
-day_map = {}
+for i, file_path in enumerate(files):
+    print(f"[{i+1}/{len(files)}] {file_path}")
 
-for f in files:
     try:
-        base = os.path.basename(f)
-        date = base.split("-TeamB")[0]  # extracts YYYY-MM-DD
-
-        if date not in day_map:
-            day_map[date] = []
-        day_map[date].append(f)
-
-    except:
+        df = pd.read_parquet(file_path)
+    except Exception as e:
+        print("SKIP FILE:", file_path, e)
+        bad_files.append(file_path)
         continue
 
-sample_day = list(day_map.keys())[0]
-day_files = day_map[sample_day]
-
-print(f"\nSelected day: {sample_day}")
-print(f"Files: {len(day_files)}")
-
-day_frames = []
-
-for f in day_files:
     try:
-        df = pd.read_parquet(f)
-        df["source_file"] = os.path.basename(f)
-        day_frames.append(df)
+        result = process(df)
+        if result is not None:
+            results.append(result)
+
     except Exception as e:
-        print("Skip:", f, e)
+        print("Processing error:", file_path, e)
 
-if len(day_frames) > 0:
-    day_data = pd.concat(day_frames, ignore_index=True)
+    del df
+    gc.collect()
 
-    print("\n===== ONE DAY DATA SAMPLE =====")
-    print(day_data.head(30))
+# ----------------------------
+# FINAL OUTPUT
+# ----------------------------
+print("\nCombining results...")
 
-    print("\nSHAPE:", day_data.shape)
+if results:
+    final_result = pd.concat(results)
 
-    print("\nCOLUMNS:")
-    print(day_data.columns)
+    # reset index for readability
+    final_result = final_result.reset_index()
+
+    print("\n===== PLAYER-LEVEL SAMPLE =====")
+    print(final_result.head(20))
+
+    print("\nSHAPE:", final_result.shape)
 
 else:
-    print("No data loaded for day sample")
+    print("No results generated")
 
-# ----------------------------
-# DONE
-# ----------------------------
-print("\nDONE")
+print("\nBad files:", len(bad_files))
+print("DONE")
