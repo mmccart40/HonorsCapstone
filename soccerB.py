@@ -1,20 +1,38 @@
 import os
 import pandas as pd
 
-# -------------------------
-# ROOT PATH (ACES)
-# -------------------------
-root_path = root_path = "/scratch/user/u.mm342941/objective-TeamB-2020/2020"
+# =========================================================
+# ACES SAFE CONFIG
+# =========================================================
 
-print("Root path:", root_path)
+ROOT_PATH = "/scratch/user/u.mm342941/objective-TeamB-2020/2020"
 
-dfs = []
-bad_files = []
+print("Root path:", ROOT_PATH)
+print("Exists:", os.path.exists(ROOT_PATH))
 
-# -------------------------
-# RECURSIVE WALK THROUGH ALL FOLDERS
-# -------------------------
-for dirpath, dirnames, filenames in os.walk(root_path):
+if not os.path.exists(ROOT_PATH):
+    raise FileNotFoundError(f"Dataset path not found: {ROOT_PATH}")
+
+# =========================================================
+# STORAGE (SMALL FOOTPRINT)
+# =========================================================
+
+processed_files = 0
+failed_files = 0
+
+output_path = os.path.join(ROOT_PATH, "TeamB_2020_combined.parquet")
+
+# Remove old output if exists (avoids appending issues)
+if os.path.exists(output_path):
+    os.remove(output_path)
+
+first_write = True
+
+# =========================================================
+# STREAMING PARQUET PROCESSING (NO OOM)
+# =========================================================
+
+for dirpath, dirnames, filenames in os.walk(ROOT_PATH):
 
     for file in filenames:
 
@@ -25,46 +43,45 @@ for dirpath, dirnames, filenames in os.walk(root_path):
         print("Loading:", file_path)
 
         try:
-            df_temp = pd.read_parquet(file_path)
+            # -------------------------------------------------
+            # Read parquet (optionally reduce memory here)
+            # -------------------------------------------------
+            df = pd.read_parquet(file_path)
 
-            # -------------------------
-            # Extract date from folder path
-            # Example: .../2020-06-01/
-            # -------------------------
+            # -------------------------------------------------
+            # Extract date from folder name
+            # -------------------------------------------------
             date_str = os.path.basename(dirpath)
-            df_temp["date"] = pd.to_datetime(date_str, errors="coerce")
+            df["date"] = pd.to_datetime(date_str, errors="coerce")
 
-            dfs.append(df_temp)
+            # -------------------------------------------------
+            # STREAM WRITE (prevents RAM explosion)
+            # -------------------------------------------------
+            df.to_parquet(
+                output_path,
+                engine="pyarrow",
+                index=False,
+                append=not first_write
+            )
+            first_write = False
+
+            processed_files += 1
+
+            # Free memory immediately
+            del df
 
         except Exception as e:
             print("Failed:", file_path)
             print("Reason:", e)
-            bad_files.append(file_path)
+            failed_files += 1
 
-# -------------------------
-# COMBINE DATA
-# -------------------------
-if dfs:
-    df = pd.concat(dfs, ignore_index=True)
+# =========================================================
+# SUMMARY
+# =========================================================
 
-    print("\nSUCCESS")
-    print("Shape:", df.shape)
-    print("Columns:", list(df.columns))
-
-else:
-    raise ValueError("No valid parquet files loaded")
-
-# -------------------------
-# BAD FILE REPORT
-# -------------------------
-print("\nBad files:", len(bad_files))
-for f in bad_files:
-    print(f)
-
-# -------------------------
-# SAVE FOR FAST RELOAD
-# -------------------------
-output_path = os.path.join(root_path, "TeamB_2020_combined.parquet")
-df.to_parquet(output_path)
-
-print("\nSaved combined dataset to:", output_path)
+print("\n====================")
+print("DONE")
+print("Processed files:", processed_files)
+print("Failed files:", failed_files)
+print("Output saved to:", output_path)
+print("====================")
