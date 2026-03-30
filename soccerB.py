@@ -4,7 +4,7 @@ import pandas as pd
 # -------------------------
 # ROOT PATH (ACES)
 # -------------------------
-root_path = os.path.join(os.getcwd(), "objective-TeamB-2020", "2020")
+root_path = root_path = "/scratch/user/u.mm342941/objective-TeamB-2020/2020"
 
 print("Root path:", root_path)
 
@@ -37,7 +37,7 @@ for dirpath, dirnames, filenames in os.walk(root_path):
             dfs.append(df_temp)
 
         except Exception as e:
-            print("❌ Failed:", file_path)
+            print("Failed:", file_path)
             print("Reason:", e)
             bad_files.append(file_path)
 
@@ -47,7 +47,7 @@ for dirpath, dirnames, filenames in os.walk(root_path):
 if dfs:
     df = pd.concat(dfs, ignore_index=True)
 
-    print("\n✅ SUCCESS")
+    print("\nSUCCESS")
     print("Shape:", df.shape)
     print("Columns:", list(df.columns))
 
