@@ -23,11 +23,42 @@ print(f"Found {len(files)} parquet files")
 
 
 # ----------------------------
+# QUICK DATA INSPECTION (NEW ADDITION)
+# ----------------------------
+if len(files) > 0:
+    print("\nInspecting first file for structure...\n")
+
+    try:
+        sample_df = pd.read_parquet(files[0])
+
+        print("COLUMNS:")
+        print(sample_df.columns)
+
+        print("\nSHAPE:")
+        print(sample_df.shape)
+
+        print("\nHEAD:")
+        print(sample_df.head())
+
+        print("\nDTYPES:")
+        print(sample_df.dtypes)
+
+    except Exception as e:
+        print("Could not inspect sample file:")
+        print(e)
+
+
+# ----------------------------
 # PROCESS FUNCTION (PLACEHOLDER)
 # ----------------------------
 def process(df):
+
+    # DEBUG: show columns occasionally (helps confirm schema consistency)
+    # print(df.columns)
+
     if "athlete_id" in df.columns:
         return df.groupby("athlete_id").size()
+
     return None
 
 
@@ -53,6 +84,7 @@ for i, file_path in enumerate(files):
 
     try:
         result = process(df)
+
         if result is not None:
             results.append(result)
 
@@ -71,7 +103,10 @@ print("\nCombining results...")
 
 if results:
     final_result = pd.concat(results)
+
+    print("\nFINAL RESULT PREVIEW:")
     print(final_result.head())
+
 else:
     print("No results generated")
 
