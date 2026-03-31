@@ -4,8 +4,9 @@ import pandas as pd
 import numpy as np
 
 DATA_FOLDER = "/scratch/user/u.mm342941/objective-TeamB-2020"
+CHUNK_DIR = "soccer_chunks"
 
-output_file = "soccerB_timeseries_clean.parquet"
+os.makedirs(CHUNK_DIR, exist_ok=True)
 
 files = []
 for root, dirs, filenames in os.walk(DATA_FOLDER):
@@ -16,10 +17,9 @@ for root, dirs, filenames in os.walk(DATA_FOLDER):
 print(f"Found {len(files)} parquet files")
 
 bad_files = []
-first_write = True
 
 # ----------------------------
-# PROCESS EACH FILE
+# PROCESS FILES ONE BY ONE
 # ----------------------------
 for i, file_path in enumerate(files):
 
@@ -33,7 +33,7 @@ for i, file_path in enumerate(files):
         continue
 
     # ----------------------------
-    # CLEAN
+    # CLEAN COLUMNS
     # ----------------------------
     df.columns = (
         df.columns.str.lower()
@@ -41,18 +41,19 @@ for i, file_path in enumerate(files):
         .str.replace(".", "", regex=False)
     )
 
-    # time fix
     if "time" not in df.columns:
         continue
 
+    # ----------------------------
+    # TIME + SORT
+    # ----------------------------
     df["time"] = pd.to_datetime(df["time"], errors="coerce")
     df = df.dropna(subset=["time"])
 
-    # sort within file
     df = df.sort_values(["player_name", "time"])
 
     # ----------------------------
-    # IMPUTE (PER FILE, APPROX)
+    # IMPUTE
     # ----------------------------
     num_cols = df.select_dtypes(include=[np.number]).columns
 
@@ -60,16 +61,13 @@ for i, file_path in enumerate(files):
     df[num_cols] = df[num_cols].fillna(df[num_cols].mean())
 
     # ----------------------------
-    # SAVE INCREMENTALLY
+    # SAVE CHUNK
     # ----------------------------
-    if first_write:
-        df.to_parquet(output_file, index=False)
-        first_write = False
-    else:
-        df.to_parquet(output_file, index=False, append=True)
+    chunk_path = os.path.join(CHUNK_DIR, f"part_{i}.parquet")
+    df.to_parquet(chunk_path, index=False)
 
     # ----------------------------
-    # SAMPLE PRINT (FIRST FILE ONLY)
+    # SHOW SAMPLE ONCE
     # ----------------------------
     if i == 0:
         print("\n===== SAMPLE =====")
@@ -81,14 +79,20 @@ for i, file_path in enumerate(files):
     gc.collect()
 
 # ----------------------------
-# FINAL INFO
+# FINAL
 # ----------------------------
 print("\nDONE PROCESSING")
 print("Bad files:", len(bad_files))
 
-print("\nLoading small sample for display...")
+# ----------------------------
+# LOAD SMALL SAMPLE
+# ----------------------------
+print("\nLoading sample from chunks...")
 
-sample_df = pd.read_parquet(output_file).head(50)
+sample_files = os.listdir(CHUNK_DIR)[:5]
+sample_dfs = [pd.read_parquet(os.path.join(CHUNK_DIR, f)) for f in sample_files]
+
+sample_df = pd.concat(sample_dfs).head(50)
 
 print("\n===== FINAL SAMPLE =====")
 print(sample_df)
