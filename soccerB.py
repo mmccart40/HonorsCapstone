@@ -3,16 +3,11 @@ import gc
 import pandas as pd
 import numpy as np
 
-# ----------------------------
-# ROOT DATA PATH
-# ----------------------------
 DATA_FOLDER = "/scratch/user/u.mm342941/objective-TeamB-2020"
 
-# ----------------------------
-# COLLECT FILES
-# ----------------------------
-files = []
+output_file = "soccerB_timeseries_clean.parquet"
 
+files = []
 for root, dirs, filenames in os.walk(DATA_FOLDER):
     for f in filenames:
         if f.endswith(".parquet"):
@@ -20,121 +15,82 @@ for root, dirs, filenames in os.walk(DATA_FOLDER):
 
 print(f"Found {len(files)} parquet files")
 
-if len(files) == 0:
-    print("No files found")
-    exit()
+bad_files = []
+first_write = True
 
 # ----------------------------
-# LOAD ALL FILES
+# PROCESS EACH FILE
 # ----------------------------
-dfs = []
-
 for i, file_path in enumerate(files):
+
+    print(f"\n[{i+1}/{len(files)}] {file_path}")
+
     try:
         df = pd.read_parquet(file_path)
-        df["source_file"] = os.path.basename(file_path)
-        dfs.append(df)
     except Exception as e:
-        print("Skipping file:", file_path, e)
+        print("Skipping:", file_path)
+        bad_files.append(file_path)
+        continue
 
-df = pd.concat(dfs, ignore_index=True)
+    # ----------------------------
+    # CLEAN
+    # ----------------------------
+    df.columns = (
+        df.columns.str.lower()
+        .str.replace(" ", "_")
+        .str.replace(".", "", regex=False)
+    )
 
-print("\nRaw shape:", df.shape)
+    # time fix
+    if "time" not in df.columns:
+        continue
 
-# ----------------------------
-# CLEAN COLUMN NAMES
-# ----------------------------
-df.columns = (
-    df.columns.str.lower()
-    .str.replace(" ", "_")
-    .str.replace(".", "", regex=False)
-)
+    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    df = df.dropna(subset=["time"])
 
-# ----------------------------
-# FIX TIME COLUMN
-# ----------------------------
-df["time"] = pd.to_datetime(df["time"], errors="coerce")
-df = df.dropna(subset=["time"])
+    # sort within file
+    df = df.sort_values(["player_name", "time"])
 
-# ----------------------------
-# SORT DATA (CRITICAL)
-# ----------------------------
-df = df.sort_values(["player_name", "time"]).reset_index(drop=True)
+    # ----------------------------
+    # IMPUTE (PER FILE, APPROX)
+    # ----------------------------
+    num_cols = df.select_dtypes(include=[np.number]).columns
 
-print("\nAfter sorting:", df.shape)
+    df[num_cols] = df[num_cols].ffill().bfill()
+    df[num_cols] = df[num_cols].fillna(df[num_cols].mean())
 
-# ----------------------------
-# IMPUTATION PER PLAYER
-# ----------------------------
-num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    # ----------------------------
+    # SAVE INCREMENTALLY
+    # ----------------------------
+    if first_write:
+        df.to_parquet(output_file, index=False)
+        first_write = False
+    else:
+        df.to_parquet(output_file, index=False, append=True)
 
-filled_dfs = []
+    # ----------------------------
+    # SAMPLE PRINT (FIRST FILE ONLY)
+    # ----------------------------
+    if i == 0:
+        print("\n===== SAMPLE =====")
+        print(df.head(20))
+        print("\nColumns:", df.columns)
 
-for player in df["player_name"].unique():
-
-    player_df = df[df["player_name"] == player].copy()
-    player_df = player_df.sort_values("time")
-
-    # forward fill + backward fill
-    player_df[num_cols] = player_df[num_cols].ffill().bfill()
-
-    # final fallback: column mean
-    player_df[num_cols] = player_df[num_cols].fillna(player_df[num_cols].mean())
-
-    filled_dfs.append(player_df)
-
-df_clean = pd.concat(filled_dfs, ignore_index=True)
-
-# final safety sort
-df_clean = df_clean.sort_values(["player_name", "time"]).reset_index(drop=True)
-
-# ----------------------------
-# SAMPLE OUTPUT (YOU ASKED FOR THIS)
-# ----------------------------
-print("\n===== SAMPLE DATA =====")
-print(df_clean.head(30))
-
-print("\nCOLUMNS:")
-print(df_clean.columns)
-
-print("\nSHAPE:")
-print(df_clean.shape)
-
-print("\nNULL CHECK (top 10):")
-print(df_clean.isnull().sum().sort_values(ascending=False).head(10))
+    # cleanup
+    del df
+    gc.collect()
 
 # ----------------------------
-# OPTIONAL: SIMPLE DAILY AGGREGATION (FOR BASELINE MODELS)
+# FINAL INFO
 # ----------------------------
-df_clean["date"] = df_clean["time"].dt.date
+print("\nDONE PROCESSING")
+print("Bad files:", len(bad_files))
 
-daily_df = df_clean.groupby(["player_name", "date"]).agg({
-    "speed": "mean",
-    "heart_rate": "mean",
-    "inst_acc_impulse": "sum",
-    "accl_x": "std",
-    "accl_y": "std",
-    "accl_z": "std"
-}).reset_index()
+print("\nLoading small sample for display...")
 
-print("\n===== DAILY AGGREGATED SAMPLE =====")
-print(daily_df.head(20))
+sample_df = pd.read_parquet(output_file).head(50)
 
-print("\nDAILY SHAPE:", daily_df.shape)
+print("\n===== FINAL SAMPLE =====")
+print(sample_df)
 
-# ----------------------------
-# SAVE CLEAN DATASETS
-# ----------------------------
-df_clean.to_parquet("soccerB_timeseries_clean.parquet", index=False)
-daily_df.to_parquet("soccerB_daily_features.parquet", index=False)
-
-print("\nSaved:")
-print("- soccerB_timeseries_clean.parquet")
-print("- soccerB_daily_features.parquet")
-
-# ----------------------------
-# CLEAN MEMORY
-# ----------------------------
-gc.collect()
-
-print("\nDONE")
+print("\nShape (sample):", sample_df.shape)
