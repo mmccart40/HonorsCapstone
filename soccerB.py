@@ -1,100 +1,115 @@
 import os
 import gc
 import pandas as pd
-import numpy as np
 
+# ----------------------------
+# CONFIG
+# ----------------------------
 DATA_FOLDER = "/scratch/user/u.mm342941/objective-TeamB-2020"
-CHUNK_DIR = "soccer_chunks"
+MAX_FILES = 50   # 🔥 limit to avoid OOM (increase later)
 
-os.makedirs(CHUNK_DIR, exist_ok=True)
-
+# ----------------------------
+# COLLECT FILES
+# ----------------------------
 files = []
+
 for root, dirs, filenames in os.walk(DATA_FOLDER):
     for f in filenames:
         if f.endswith(".parquet"):
             files.append(os.path.join(root, f))
 
+files.sort()
+
 print(f"Found {len(files)} parquet files")
+print(f"Processing first {MAX_FILES} files...\n")
 
 bad_files = []
+all_data = []
 
 # ----------------------------
-# PROCESS FILES ONE BY ONE
+# PROCESS FUNCTION
 # ----------------------------
-for i, file_path in enumerate(files):
+def process_file(file_path):
+    df = pd.read_parquet(file_path)
 
-    print(f"\n[{i+1}/{len(files)}] {file_path}")
+    # Keep only relevant columns
+    keep_cols = [
+        'player_name', 'time', 'lat', 'lon', 'speed', 'heart_rate',
+        'hacc', 'hdop', 'signal_quality', 'num_satellites',
+        'inst_acc_impulse', 'accl_x', 'accl_y', 'accl_z',
+        'gyro_x', 'gyro_y', 'gyro_z'
+    ]
+    df = df[[c for c in keep_cols if c in df.columns]]
 
-    try:
-        df = pd.read_parquet(file_path)
-    except Exception as e:
-        print("Skipping:", file_path)
-        bad_files.append(file_path)
-        continue
+    # Extract date from filename (FAST, avoids warnings)
+    filename = os.path.basename(file_path)
+    df["date"] = filename[:10]
 
-    # ----------------------------
-    # CLEAN COLUMNS
-    # ----------------------------
-    df.columns = (
-        df.columns.str.lower()
-        .str.replace(" ", "_")
-        .str.replace(".", "", regex=False)
-    )
-
-    if "time" not in df.columns:
-        continue
-
-    # ----------------------------
-    # TIME + SORT
-    # ----------------------------
-    df["time"] = pd.to_datetime(df["time"], errors="coerce")
-    df = df.dropna(subset=["time"])
-
+    # Sort by player and time
     df = df.sort_values(["player_name", "time"])
 
-    # ----------------------------
-    # IMPUTE
-    # ----------------------------
-    num_cols = df.select_dtypes(include=[np.number]).columns
+    # Impute missing values per athlete
+    numeric_cols = df.select_dtypes(include=["float64", "int64"]).columns
 
-    df[num_cols] = df[num_cols].ffill().bfill()
-    df[num_cols] = df[num_cols].fillna(df[num_cols].mean())
+    df[numeric_cols] = (
+        df.groupby("player_name")[numeric_cols]
+        .transform(lambda x: x.ffill().bfill())
+    )
 
-    # ----------------------------
-    # SAVE CHUNK
-    # ----------------------------
-    chunk_path = os.path.join(CHUNK_DIR, f"part_{i}.parquet")
-    df.to_parquet(chunk_path, index=False)
+    return df
 
-    # ----------------------------
-    # SHOW SAMPLE ONCE
-    # ----------------------------
-    if i == 0:
-        print("\n===== SAMPLE =====")
-        print(df.head(20))
-        print("\nColumns:", df.columns)
 
-    # cleanup
+# ----------------------------
+# MAIN LOOP
+# ----------------------------
+for i, file_path in enumerate(files[:MAX_FILES]):
+
+    print(f"[{i+1}/{MAX_FILES}] {file_path}")
+
+    try:
+        df = process_file(file_path)
+
+        # Keep a SMALL sample from each file to avoid memory explosion
+        all_data.append(df.head(500))
+
+    except Exception as e:
+        print("ERROR:", file_path)
+        print(e)
+        bad_files.append(file_path)
+
     del df
     gc.collect()
 
-# ----------------------------
-# FINAL
-# ----------------------------
-print("\nDONE PROCESSING")
-print("Bad files:", len(bad_files))
 
 # ----------------------------
-# LOAD SMALL SAMPLE
+# COMBINE SAMPLE DATA
 # ----------------------------
-print("\nLoading sample from chunks...")
+print("\nCombining sampled data...\n")
 
-sample_files = os.listdir(CHUNK_DIR)[:5]
-sample_dfs = [pd.read_parquet(os.path.join(CHUNK_DIR, f)) for f in sample_files]
+if all_data:
+    final_df = pd.concat(all_data, ignore_index=True)
 
-sample_df = pd.concat(sample_dfs).head(50)
+    print("===== FINAL SAMPLE =====")
+    print(final_df.head(30))
 
-print("\n===== FINAL SAMPLE =====")
-print(sample_df)
+    print("\nSHAPE:", final_df.shape)
 
-print("\nShape (sample):", sample_df.shape)
+    print("\nCOLUMNS:")
+    print(final_df.columns)
+
+    # ----------------------------
+    # SHOW ONE ATHLETE OVER TIME
+    # ----------------------------
+    sample_player = final_df["player_name"].iloc[0]
+
+    player_df = final_df[final_df["player_name"] == sample_player]
+
+    print(f"\n===== TIME SERIES FOR ONE ATHLETE =====")
+    print(f"Athlete: {sample_player}\n")
+    print(player_df.head(30))
+
+else:
+    print("No data processed")
+
+print("\nBad files:", len(bad_files))
+print("DONE")
