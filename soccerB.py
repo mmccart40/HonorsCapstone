@@ -9,21 +9,23 @@ DATA_FOLDER = "/scratch/user/u.mm342941/objective-TeamB-2020"
 SUBJECTIVE_FOLDER = "subjective"
 MAX_FILES = 50
 
+
 # ----------------------------
 # LOAD SUBJECTIVE FILES SAFELY
 # ----------------------------
 def load_if_exists(path, name):
+
     if not os.path.exists(path):
         print(f"Missing: {path}")
         return None
 
-    print(f"Loaded: {path}")
+    print(f"\nLoaded: {path}")
     df = pd.read_csv(path)
 
     df.columns = df.columns.str.lower().str.strip().str.replace(" ", "_")
 
     # ----------------------------
-    # player_name handling
+    # player_name standardization
     # ----------------------------
     if "athlete_id" in df.columns:
         df = df.rename(columns={"athlete_id": "player_name"})
@@ -31,42 +33,39 @@ def load_if_exists(path, name):
         df = df.rename(columns={"player_id": "player_name"})
 
     if "player_name" not in df.columns:
-        print(f"WARNING: no player column in {name}, skipping")
+        print(f"WARNING: no player column in {name}")
         return None
 
     df["player_name"] = df["player_name"].astype(str).str.strip()
-    df["player_name"] = df["player_name"].apply(lambda x: x if x.startswith("TeamB-") else f"TeamB-{x}")
+    df["player_name"] = df["player_name"].apply(
+        lambda x: x if x.startswith("TeamB-") else f"TeamB-{x}"
+    )
 
     # ----------------------------
-    # date handling (ONLY ONCE)
+    # DATE FIX (CRITICAL)
     # ----------------------------
     if "timestamp" in df.columns:
         df["date"] = pd.to_datetime(df["timestamp"], errors="coerce", dayfirst=True).dt.date
     elif "time" in df.columns:
-        df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
+        df["date"] = pd.to_datetime(df["time"], errors="coerce", dayfirst=True).dt.date
     elif "datetime" in df.columns:
-        df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
+        df["date"] = pd.to_datetime(df["datetime"], errors="coerce", dayfirst=True).dt.date
     elif "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        df["date"] = pd.to_datetime(df["date"], errors="coerce", dayfirst=True).dt.date
     else:
-        print(f"WARNING: no date column in {name}, skipping")
+        print(f"WARNING: no date column in {name}")
         return None
 
     df = df.dropna(subset=["player_name", "date"])
 
+    # DEBUG
     print("\n--- SUBJECTIVE DEBUG ---")
     print("File:", name)
     print("Shape:", df.shape)
     print("Columns:", df.columns.tolist())
-
-    print("\nPlayer sample:")
-    print(df["player_name"].head(5))
-
-    print("\nDate sample:")
-    print(df["date"].head(5))
-
-    print("\nNull dates:")
-    print(df["date"].isna().sum(), "/", len(df))
+    print("Null dates:", df["date"].isna().sum())
+    print("Sample keys:")
+    print(df[["player_name", "date"]].head(5))
 
     return df
 
@@ -88,23 +87,20 @@ for name, path in paths:
     if df_temp is not None:
         subjective_dfs.append(df_temp)
 
-print(f"Loaded subjective datasets: {len(subjective_dfs)}\n")
+print(f"\nLoaded subjective datasets: {len(subjective_dfs)}")
 
-# combine subjective data
-subjective_all = pd.concat(subjective_dfs, ignore_index=True) if subjective_dfs else None
+if len(subjective_dfs) == 0:
+    subjective_all = None
+else:
+    subjective_all = pd.concat(subjective_dfs, ignore_index=True)
 
-print("\n===== SUBJECTIVE MASTER TABLE CHECK =====")
-print("Shape:", subjective_all.shape)
+    print("\n===== SUBJECTIVE MASTER CHECK =====")
+    print("Shape:", subjective_all.shape)
+    print("Min date:", subjective_all["date"].min())
+    print("Max date:", subjective_all["date"].max())
+    print("Unique players:", subjective_all["player_name"].nunique())
 
-print("\nDate range:")
-print("Min:", subjective_all["date"].min())
-print("Max:", subjective_all["date"].max())
 
-print("\nUnique players:")
-print(subjective_all["player_name"].nunique())
-
-print("\nSample keys:")
-print(subjective_all[["player_name", "date"]].drop_duplicates().head(10))
 # ----------------------------
 # COLLECT PARQUET FILES
 # ----------------------------
@@ -117,22 +113,22 @@ for root, dirs, filenames in os.walk(DATA_FOLDER):
 
 files.sort()
 
-print(f"Found {len(files)} parquet files")
-print(f"Processing first {MAX_FILES} files...\n")
+print(f"\nFound {len(files)} parquet files")
+print(f"Processing first {MAX_FILES}\n")
 
 all_data = []
 bad_files = []
 
+
 # ----------------------------
-# PROCESS FUNCTION
+# PROCESS FILE
 # ----------------------------
 def process_file(file_path):
 
     try:
         df = pd.read_parquet(file_path)
     except Exception as e:
-        print(f"SKIP: {file_path}")
-        print("Reason:", e)
+        print("SKIP:", file_path, e)
         return None
 
     keep_cols = [
@@ -144,39 +140,44 @@ def process_file(file_path):
 
     df = df[[c for c in keep_cols if c in df.columns]]
 
-    # standardize player_name format
+    # player_name cleanup
     if "player_name" in df.columns:
         df["player_name"] = df["player_name"].astype(str).str.strip()
-        df["player_name"] = df["player_name"].apply(lambda x: x if x.startswith("TeamB-") else f"TeamB-{x}")
+        df["player_name"] = df["player_name"].apply(
+            lambda x: x if x.startswith("TeamB-") else f"TeamB-{x}"
+        )
 
-    # extract date from filename
+    # ----------------------------
+    # DATE FIX (CRITICAL)
+    # ----------------------------
     filename = os.path.basename(file_path)
     date_val = pd.to_datetime(filename[:10], errors="coerce")
+
     df["date"] = date_val.date() if not pd.isna(date_val) else None
 
+    # DEBUG
     print("\n--- OBJECTIVE DEBUG ---")
     print("File:", file_path)
-
     print("Date:", df["date"].iloc[0] if len(df) > 0 else None)
-
-    print("Player sample:", df["player_name"].iloc[0] if "player_name" in df.columns else "MISSING")
-
+    print("Players:", df["player_name"].iloc[0] if "player_name" in df.columns else "MISSING")
     print("Rows:", len(df))
 
-    # parse time safely
+    # time parsing
     if "time" in df.columns:
-        df["time"] = pd.to_datetime(df["time"], errors="coerce", format="mixed")
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
 
-    # sort data
+    # sort
     if "player_name" in df.columns and "time" in df.columns:
         df = df.sort_values(["player_name", "time"])
 
-    # impute missing numeric values
+    # fill numeric
     numeric_cols = df.select_dtypes(include=["float64", "int64"]).columns
-    if "player_name" in df.columns and len(numeric_cols) > 0:
-        df[numeric_cols] = df.groupby("player_name")[numeric_cols].transform(lambda x: x.ffill().bfill())
+    if "player_name" in df.columns:
+        df[numeric_cols] = df.groupby("player_name")[numeric_cols].transform(
+            lambda x: x.ffill().bfill()
+        )
 
-    # merge subjective data
+    # merge subjective
     if subjective_all is not None:
         df = df.merge(subjective_all, on=["player_name", "date"], how="left")
 
@@ -188,7 +189,7 @@ def process_file(file_path):
 # ----------------------------
 for i, file_path in enumerate(files[:MAX_FILES]):
 
-    print(f"[{i+1}/{MAX_FILES}] {file_path}")
+    print(f"\n[{i+1}/{MAX_FILES}] {file_path}")
 
     df = process_file(file_path)
 
@@ -203,76 +204,68 @@ for i, file_path in enumerate(files[:MAX_FILES]):
 
 
 # ----------------------------
-# COMBINE RESULTS
+# FINAL COMBINE
 # ----------------------------
 print("\nCombining results...\n")
 
 if len(all_data) > 0:
+
     final_df = pd.concat(all_data, ignore_index=True)
 
-    print("===== FINAL DATA SAMPLE =====")
-    print(final_df.head(30))
+    print("SHAPE:", final_df.shape)
+    print("\nSAMPLE:")
+    print(final_df.head(20))
 
-    print("\nSHAPE:", final_df.shape)
-    print("\nCOLUMNS:", list(final_df.columns))
-
-    # merge check
+    # ----------------------------
+    # KEY INTERSECTION CHECK (IMPORTANT)
+    # ----------------------------
     if subjective_all is not None:
-        print("\n===== MERGE CHECK =====")
-        print(final_df[['player_name', 'date']].drop_duplicates().head())
 
-    # show one athlete
-    if "player_name" in final_df.columns:
-        sample_player = final_df["player_name"].iloc[0]
-        player_df = final_df[final_df["player_name"] == sample_player]
+        print("\n===== KEY INTERSECTION CHECK =====")
 
-        print("\n===== ONE ATHLETE OVER TIME =====")
-        print("Athlete:", sample_player)
-        print(player_df.head(30))
+        obj_keys = set(zip(final_df["player_name"], final_df["date"]))
+        sub_keys = set(zip(subjective_all["player_name"], subjective_all["date"]))
+
+        print("Objective keys:", len(obj_keys))
+        print("Subjective keys:", len(sub_keys))
+        print("Intersection:", len(obj_keys & sub_keys))
+
+    # sample player
+    player = final_df["player_name"].iloc[0]
+    print("\nSample player:", player)
+    print(final_df[final_df["player_name"] == player].head(20))
 
 else:
-    print("No valid data processed")
+    print("No data processed")
+    final_df = None
+
 
 # ----------------------------
-# SUBJECTIVE VALIDATION
+# SUBJECTIVE COVERAGE CHECK
 # ----------------------------
-print("\n===== SUBJECTIVE COLUMNS AFTER MERGE =====")
-base_cols = [
-    'player_name','time','lat','lon','speed','heart_rate',
-    'hacc','hdop','signal_quality','num_satellites',
-    'inst_acc_impulse','accl_x','accl_y','accl_z',
-    'gyro_x','gyro_y','gyro_z','date'
-]
-subjective_cols = [c for c in final_df.columns if c not in base_cols]
-print(subjective_cols)
+print("\n===== SUBJECTIVE COVERAGE =====")
 
-print("\n===== SUBJECTIVE MERGE COVERAGE =====")
-for col in subjective_cols[:10]:
-    non_null = final_df[col].notna().sum()
-    total = len(final_df)
-    print(f"{col}: {non_null}/{total} ({non_null/total:.2%})")
+if final_df is not None and subjective_all is not None:
 
-print("\n===== MERGE SUCCESS CHECK =====")
+    subjective_cols = [
+        c for c in final_df.columns
+        if c not in [
+            'player_name','time','lat','lon','speed','heart_rate',
+            'hacc','hdop','signal_quality','num_satellites',
+            'inst_acc_impulse','accl_x','accl_y','accl_z',
+            'gyro_x','gyro_y','gyro_z','date'
+        ]
+    ]
 
-merged_cols = ["player_name", "date"] + [c for c in df.columns if c not in ["player_name", "time", "lat", "lon", "speed"]]
+    print("Subjective columns:", subjective_cols)
 
-print("Null subjective rows:", df[subjective_all.columns].isna().all(axis=1).mean())
+    for col in subjective_cols[:10]:
+        coverage = final_df[col].notna().mean()
+        print(f"{col}: {coverage:.2%}")
 
-print("\nCoverage per column:")
-for col in subjective_all.columns:
-    if col in df.columns:
-        print(col, "->", df[col].notna().mean())
+else:
+    print("Skipping coverage check (missing data)")
 
-print("\n===== MERGE SUCCESS CHECK =====")
-
-merged_cols = ["player_name", "date"] + [c for c in df.columns if c not in ["player_name", "time", "lat", "lon", "speed"]]
-
-print("Null subjective rows:", df[subjective_all.columns].isna().all(axis=1).mean())
-
-print("\nCoverage per column:")
-for col in subjective_all.columns:
-    if col in df.columns:
-        print(col, "->", df[col].notna().mean())
 
 # ----------------------------
 # SUMMARY
