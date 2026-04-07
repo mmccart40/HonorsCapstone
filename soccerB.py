@@ -13,47 +13,48 @@ MAX_FILES = 50
 # LOAD SUBJECTIVE FILES SAFELY
 # ----------------------------
 def load_if_exists(path, name):
-    if os.path.exists(path):
-        print(f"Loaded: {path}")
-        df = pd.read_csv(path)
-
-        # clean column names
-        df.columns = df.columns.str.lower().str.strip().str.replace(" ", "_")
-
-        # fix player id column
-        if "athlete_id" in df.columns:
-            df = df.rename(columns={"athlete_id": "player_name"})
-        elif "player_id" in df.columns:
-            df = df.rename(columns={"player_id": "player_name"})
-
-        # ensure player_name exists
-        if "player_name" not in df.columns:
-            print(f"WARNING: no player column in {name}, skipping")
-            return None
-
-        # standardize player_name format
-        df["player_name"] = df["player_name"].astype(str).str.strip()
-        df["player_name"] = df["player_name"].apply(lambda x: x if x.startswith("TeamB-") else f"TeamB-{x}")
-
-        # create date column
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-        elif "datetime" in df.columns:
-            df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
-        elif "time" in df.columns:
-            df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
-        else:
-            print(f"WARNING: no date column in {name}, skipping")
-            return None
-
-        # drop invalid rows
-        df = df.dropna(subset=["player_name", "date"])
-
-        return df
-
-    else:
+    if not os.path.exists(path):
         print(f"Missing: {path}")
         return None
+
+    print(f"Loaded: {path}")
+    df = pd.read_csv(path)
+
+    df.columns = df.columns.str.lower().str.strip().str.replace(" ", "_")
+
+    # ----------------------------
+    # player_name handling
+    # ----------------------------
+    if "athlete_id" in df.columns:
+        df = df.rename(columns={"athlete_id": "player_name"})
+    elif "player_id" in df.columns:
+        df = df.rename(columns={"player_id": "player_name"})
+
+    if "player_name" not in df.columns:
+        print(f"WARNING: no player column in {name}, skipping")
+        return None
+
+    df["player_name"] = df["player_name"].astype(str).str.strip()
+    df["player_name"] = df["player_name"].apply(lambda x: x if x.startswith("TeamB-") else f"TeamB-{x}")
+
+    # ----------------------------
+    # date handling (ONLY ONCE)
+    # ----------------------------
+    if "timestamp" in df.columns:
+        df["date"] = pd.to_datetime(df["timestamp"], format="%d.%m.%Y", errors="coerce").dt.date
+    elif "time" in df.columns:
+        df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
+    elif "datetime" in df.columns:
+        df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
+    elif "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+    else:
+        print(f"WARNING: no date column in {name}, skipping")
+        return None
+
+    df = df.dropna(subset=["player_name", "date"])
+
+    return df
 
 
 print("Loading subjective data...")
@@ -125,7 +126,7 @@ def process_file(file_path):
     # extract date from filename
     filename = os.path.basename(file_path)
     date_val = pd.to_datetime(filename[:10], errors="coerce")
-    df["date"] = date_val.date() if pd.notna(date_val) else None
+    df["date"] = date_val.date() if not pd.isna(date_val) else None
 
     # parse time safely
     if "time" in df.columns:
