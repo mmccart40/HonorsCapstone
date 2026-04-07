@@ -202,6 +202,8 @@ for i, file_path in enumerate(files[:MAX_FILES]):
     del df
     gc.collect()
 
+print("\n===== SUBJECTIVE KEY SAMPLE =====")
+print(subjective_all[["player_name", "date"]].drop_duplicates().head(10))
 
 # ----------------------------
 # FINAL COMBINE
@@ -215,6 +217,10 @@ if len(all_data) > 0:
     print("SHAPE:", final_df.shape)
     print("\nSAMPLE:")
     print(final_df.head(20))
+
+    print("\n===== OBJECTIVE KEY SAMPLE =====")
+    print(final_df[["player_name", "date"]].drop_duplicates().head(10))
+
 
     # ----------------------------
     # KEY INTERSECTION CHECK (IMPORTANT)
