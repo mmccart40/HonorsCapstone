@@ -41,7 +41,7 @@ def load_if_exists(path, name):
     # date handling (ONLY ONCE)
     # ----------------------------
     if "timestamp" in df.columns:
-        df["date"] = pd.to_datetime(df["timestamp"], format="%d.%m.%Y", errors="coerce").dt.date
+        df["date"] = pd.to_datetime(df["timestamp"], errors="coerce").dt.date
     elif "time" in df.columns:
         df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
     elif "datetime" in df.columns:
