@@ -54,6 +54,20 @@ def load_if_exists(path, name):
 
     df = df.dropna(subset=["player_name", "date"])
 
+    print("\n--- SUBJECTIVE DEBUG ---")
+    print("File:", name)
+    print("Shape:", df.shape)
+    print("Columns:", df.columns.tolist())
+
+    print("\nPlayer sample:")
+    print(df["player_name"].head(5))
+
+    print("\nDate sample:")
+    print(df["date"].head(5))
+
+    print("\nNull dates:")
+    print(df["date"].isna().sum(), "/", len(df))
+
     return df
 
 
@@ -79,6 +93,18 @@ print(f"Loaded subjective datasets: {len(subjective_dfs)}\n")
 # combine subjective data
 subjective_all = pd.concat(subjective_dfs, ignore_index=True) if subjective_dfs else None
 
+print("\n===== SUBJECTIVE MASTER TABLE CHECK =====")
+print("Shape:", subjective_all.shape)
+
+print("\nDate range:")
+print("Min:", subjective_all["date"].min())
+print("Max:", subjective_all["date"].max())
+
+print("\nUnique players:")
+print(subjective_all["player_name"].nunique())
+
+print("\nSample keys:")
+print(subjective_all[["player_name", "date"]].drop_duplicates().head(10))
 # ----------------------------
 # COLLECT PARQUET FILES
 # ----------------------------
@@ -127,6 +153,15 @@ def process_file(file_path):
     filename = os.path.basename(file_path)
     date_val = pd.to_datetime(filename[:10], errors="coerce")
     df["date"] = date_val.date() if not pd.isna(date_val) else None
+
+    print("\n--- OBJECTIVE DEBUG ---")
+    print("File:", file_path)
+
+    print("Date:", df["date"].iloc[0] if len(df) > 0 else None)
+
+    print("Player sample:", df["player_name"].iloc[0] if "player_name" in df.columns else "MISSING")
+
+    print("Rows:", len(df))
 
     # parse time safely
     if "time" in df.columns:
@@ -216,6 +251,28 @@ for col in subjective_cols[:10]:
     non_null = final_df[col].notna().sum()
     total = len(final_df)
     print(f"{col}: {non_null}/{total} ({non_null/total:.2%})")
+
+print("\n===== MERGE SUCCESS CHECK =====")
+
+merged_cols = ["player_name", "date"] + [c for c in df.columns if c not in ["player_name", "time", "lat", "lon", "speed"]]
+
+print("Null subjective rows:", df[subjective_all.columns].isna().all(axis=1).mean())
+
+print("\nCoverage per column:")
+for col in subjective_all.columns:
+    if col in df.columns:
+        print(col, "->", df[col].notna().mean())
+
+print("\n===== MERGE SUCCESS CHECK =====")
+
+merged_cols = ["player_name", "date"] + [c for c in df.columns if c not in ["player_name", "time", "lat", "lon", "speed"]]
+
+print("Null subjective rows:", df[subjective_all.columns].isna().all(axis=1).mean())
+
+print("\nCoverage per column:")
+for col in subjective_all.columns:
+    if col in df.columns:
+        print(col, "->", df[col].notna().mean())
 
 # ----------------------------
 # SUMMARY
