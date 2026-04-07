@@ -17,19 +17,39 @@ def load_if_exists(path, name):
         print(f"Loaded: {path}")
         df = pd.read_csv(path)
 
-        # Standardize column names
+        # ------------------------
+        # CLEAN COLUMN NAMES
+        # ------------------------
         df.columns = df.columns.str.lower().str.replace(" ", "_")
 
-        # Ensure player + date columns exist
+        # ------------------------
+        # FIX PLAYER NAME
+        # ------------------------
         if "player_name" not in df.columns:
             if "athlete_id" in df.columns:
                 df = df.rename(columns={"athlete_id": "player_name"})
 
+        # ------------------------
+        # FORCE DATE COLUMN (CRITICAL FIX)
+        # ------------------------
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
 
-        df["source"] = name
+        elif "datetime" in df.columns:
+            df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
+
+        elif "time" in df.columns:
+            df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
+
+        else:
+            print(f"WARNING: No usable date column in {name}, skipping")
+            return None
+
+        # Drop bad rows
+        df = df.dropna(subset=["player_name", "date"])
+
         return df
+
     else:
         print(f"Missing: {path}")
         return None
@@ -100,7 +120,7 @@ def process_file(file_path):
     df = df[[c for c in keep_cols if c in df.columns]]
 
     # ------------------------
-    # FIX DATE PARSING (NO .dt ERROR)
+    # FIX DATE FROM FILENAME
     # ------------------------
     filename = os.path.basename(file_path)
 
@@ -111,14 +131,19 @@ def process_file(file_path):
         df["date"] = None
 
     # ------------------------
+    # FIX TIME PARSING (no warning)
+    # ------------------------
+    if "time" in df.columns:
+        df["time"] = pd.to_datetime(df["time"], errors="coerce", format="mixed")
+
+    # ------------------------
     # SORT
     # ------------------------
     if "player_name" in df.columns and "time" in df.columns:
-        df["time"] = pd.to_datetime(df["time"], errors="coerce")
         df = df.sort_values(["player_name", "time"])
 
     # ------------------------
-    # IMPUTE
+    # IMPUTE MISSING VALUES
     # ------------------------
     numeric_cols = df.select_dtypes(include=["float64", "int64"]).columns
 
@@ -129,10 +154,12 @@ def process_file(file_path):
         )
 
     # ------------------------
-    # MERGE SUBJECTIVE DATA
+    # SAFE MERGE SUBJECTIVE DATA
     # ------------------------
     if subjective_all is not None:
-        if "player_name" in df.columns and "date" in df.columns:
+        if all(col in df.columns for col in ["player_name", "date"]) and \
+           all(col in subjective_all.columns for col in ["player_name", "date"]):
+
             df = df.merge(
                 subjective_all,
                 on=["player_name", "date"],
@@ -176,7 +203,7 @@ if len(all_data) > 0:
     print("\nCOLUMNS:", list(final_df.columns))
 
     # ----------------------------
-    # DEBUG: CHECK MERGE SUCCESS
+    # MERGE CHECK
     # ----------------------------
     if subjective_all is not None:
         print("\n===== MERGE CHECK =====")
