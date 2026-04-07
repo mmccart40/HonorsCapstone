@@ -1,91 +1,162 @@
 import pandas as pd
 import numpy as np
 import glob
-import os
 
 # =========================
-# 1. LOAD OBJECTIVE DATA
+# HELPERS
 # =========================
 
-objective_files = glob.glob("/scratch/user/u.mm342941/objective-TeamB-2020/**/*.parquet", recursive=True)
+def find_timestamp_column(df):
+    candidates = [
+        "timestamp", "time", "datetime",
+        "date_time", "event_time", "eventtime"
+    ]
+
+    for c in candidates:
+        if c in df.columns:
+            return c
+
+    return None
+
+
+def safe_to_date(df, col):
+    return pd.to_datetime(df[col], errors="coerce").dt.date
+
+
+# =========================
+# LOAD OBJECTIVE DATA
+# =========================
+
+objective_files = glob.glob(
+    "/scratch/user/u.mm342941/objective-TeamB-2020/**/*.parquet",
+    recursive=True
+)
 
 objective_list = []
+bad_obj_files = 0
 
 for file in objective_files:
-    print(f"Loading objective: {file}")
+    print("[OBJECTIVE] Loading:", file)
 
-    df = pd.read_parquet(file)
+    try:
+        df = pd.read_parquet(file)
 
-    # ---- FIX: timestamp → date ----
-    df["date"] = pd.to_datetime(df["timestamp"], errors="coerce").dt.date
+        ts_col = find_timestamp_column(df)
 
-    # ---- CLEAN player names ----
-    df["player_name"] = df["player_name"].astype(str).str.strip()
+        if ts_col is None:
+            print("SKIP: no timestamp column")
+            bad_obj_files += 1
+            continue
 
-    objective_list.append(df)
+        df["date"] = safe_to_date(df, ts_col)
+        df = df.dropna(subset=["date"])
+
+        if df.empty:
+            print("SKIP: empty after date parsing")
+            bad_obj_files += 1
+            continue
+
+        if "player_name" not in df.columns:
+            print("SKIP: no player_name column")
+            bad_obj_files += 1
+            continue
+
+        df["player_name"] = df["player_name"].astype(str).str.strip()
+
+        objective_list.append(df)
+
+    except Exception as e:
+        print("FAILED FILE:", file)
+        print("ERROR:", e)
+        bad_obj_files += 1
+        continue
+
 
 objective = pd.concat(objective_list, ignore_index=True)
 
 print("\nOBJECTIVE RAW SHAPE:", objective.shape)
+print("BAD OBJECTIVE FILES:", bad_obj_files)
 
 
 # =========================
-# 2. AGGREGATE OBJECTIVE TO PLAYER-DAY
+# AGGREGATE OBJECTIVE TO PLAYER-DAY
 # =========================
 
-# Adjust feature names if needed
+numeric_cols = objective.select_dtypes(include=[np.number]).columns.tolist()
+agg_dict = {c: "mean" for c in numeric_cols}
+
 objective_daily = (
     objective
     .groupby(["player_name", "date"])
-    .agg({
-        # replace these with actual columns in your dataset
-        "speed": "mean",
-        "distance": "sum",
-        "acceleration": "mean"
-    })
+    .agg(agg_dict)
     .reset_index()
 )
 
-print("\nOBJECTIVE DAILY SHAPE:", objective_daily.shape)
+print("OBJECTIVE DAILY SHAPE:", objective_daily.shape)
 
 
 # =========================
-# 3. LOAD SUBJECTIVE DATA
+# LOAD SUBJECTIVE DATA
 # =========================
 
-subjective_files = glob.glob("/scratch/user/u.mm342941/subjective-TeamB/**/*.parquet", recursive=True)
+subjective_files = glob.glob(
+    "/scratch/user/u.mm342941/subjective-TeamB/**/*.parquet",
+    recursive=True
+)
 
 subjective_list = []
+bad_sub_files = 0
 
 for file in subjective_files:
-    print(f"Loading subjective: {file}")
+    print("[SUBJECTIVE] Loading:", file)
 
-    df = pd.read_parquet(file)
+    try:
+        df = pd.read_parquet(file)
 
-    # ---- FIX PLAYER ID MISMATCH ----
-    df["player_name"] = (
-        df["player_name"]
-        .astype(str)
-        .str.replace(r"^TeamB-TeamA-", "TeamB-", regex=True)
-        .str.strip()
-    )
+        if "player_name" not in df.columns:
+            print("SKIP: no player_name")
+            bad_sub_files += 1
+            continue
 
-    # ---- FIX DATE FORMAT ----
-    df["date"] = pd.to_datetime(
-        df["timestamp"],
-        format="%d.%m.%Y",
-        errors="coerce"
-    ).dt.date
+        df["player_name"] = (
+            df["player_name"]
+            .astype(str)
+            .str.replace(r"^TeamB-TeamA-", "TeamB-", regex=True)
+            .str.strip()
+        )
 
-    subjective_list.append(df)
+        ts_col = find_timestamp_column(df)
+
+        if ts_col is None:
+            print("SKIP: no timestamp column")
+            bad_sub_files += 1
+            continue
+
+        df["date"] = safe_to_date(df, ts_col)
+        df = df.dropna(subset=["date"])
+
+        if df.empty:
+            print("SKIP: empty after date parsing")
+            bad_sub_files += 1
+            continue
+
+        subjective_list.append(df)
+
+    except Exception as e:
+        print("FAILED SUBJECTIVE FILE:", file)
+        print("ERROR:", e)
+        bad_sub_files += 1
+        continue
+
 
 subjective = pd.concat(subjective_list, ignore_index=True)
 
 print("\nSUBJECTIVE RAW SHAPE:", subjective.shape)
+print("BAD SUBJECTIVE FILES:", bad_sub_files)
 
 
 # =========================
-# 4. AGGREGATE SUBJECTIVE TO PLAYER-DAY
+# AGGREGATE SUBJECTIVE TO PLAYER-DAY
 # =========================
 
 subjective_daily = (
@@ -100,17 +171,17 @@ subjective_daily = (
     .reset_index()
 )
 
-print("\nSUBJECTIVE DAILY SHAPE:", subjective_daily.shape)
+print("SUBJECTIVE DAILY SHAPE:", subjective_daily.shape)
 
 
 # =========================
-# 5. ALIGN DATE RANGE
+# ALIGN DATE RANGE
 # =========================
 
 common_start = max(objective_daily["date"].min(), subjective_daily["date"].min())
 common_end = min(objective_daily["date"].max(), subjective_daily["date"].max())
 
-print("\nCOMMON DATE RANGE:", common_start, "→", common_end)
+print("\nCOMMON DATE RANGE:", common_start, "->", common_end)
 
 objective_daily = objective_daily[
     objective_daily["date"].between(common_start, common_end)
@@ -122,7 +193,7 @@ subjective_daily = subjective_daily[
 
 
 # =========================
-# 6. MERGE
+# MERGE
 # =========================
 
 final_df = objective_daily.merge(
@@ -135,15 +206,17 @@ print("\nFINAL SHAPE:", final_df.shape)
 
 
 # =========================
-# 7. DEBUG CHECKS
+# DEBUG CHECKS
 # =========================
 
-print("\n===== MERGE COVERAGE =====")
-print("team_performance coverage:",
-      final_df["team_performance"].notna().mean())
+print("\nMERGE COVERAGE:")
+print(final_df["team_performance"].notna().mean())
 
-print("\n===== SAMPLE OUTPUT =====")
+print("\nSAMPLE:")
 print(final_df.head(10))
 
-print("\n===== NULL CHECK =====")
-print(final_df.isna().mean())
+print("\nNULL RATE:")
+print(final_df.isna().mean().sort_values(ascending=False))
+
+print("\nBAD OBJECTIVE FILES:", bad_obj_files)
+print("BAD SUBJECTIVE FILES:", bad_sub_files)
