@@ -10,18 +10,23 @@ SUBJECTIVE_FOLDER = "subjective"
 MAX_FILES = 50
 
 # ----------------------------
-# LOAD SUBJECTIVE DATA (SAFE)
+# LOAD SUBJECTIVE FILES SAFELY
 # ----------------------------
-print("Loading subjective data...\n")
-
 def load_if_exists(path, name):
     if os.path.exists(path):
         print(f"Loaded: {path}")
         df = pd.read_csv(path)
 
-        df.columns = df.columns.str.lower()
-        df.columns = df.columns.str.replace(" ", "_")
-        df.columns = df.columns.str.replace(".", "", regex=False)
+        # Standardize column names
+        df.columns = df.columns.str.lower().str.replace(" ", "_")
+
+        # Ensure player + date columns exist
+        if "player_name" not in df.columns:
+            if "athlete_id" in df.columns:
+                df = df.rename(columns={"athlete_id": "player_name"})
+
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
 
         df["source"] = name
         return df
@@ -29,43 +34,34 @@ def load_if_exists(path, name):
         print(f"Missing: {path}")
         return None
 
+
+print("Loading subjective data...")
+
 subjective_dfs = []
 
-files_to_check = [
-    ("subjective/injury/injury.csv", "injury"),
-    ("subjective/wellness/wellness.csv", "wellness"),
-    ("subjective/training-load/training-load.csv", "training"),
-    ("subjective/game-performance/game-performance.csv", "game"),
-    ("subjective/illness/illness.csv", "illness"),
+paths = [
+    ("injury", f"{SUBJECTIVE_FOLDER}/injury/injury.csv"),
+    ("wellness", f"{SUBJECTIVE_FOLDER}/wellness/wellness.csv"),
+    ("training", f"{SUBJECTIVE_FOLDER}/training-load/training-load.csv"),
+    ("performance", f"{SUBJECTIVE_FOLDER}/game-performance/game-performance.csv"),
+    ("illness", f"{SUBJECTIVE_FOLDER}/illness/illness.csv"),
 ]
 
-for path, name in files_to_check:
+for name, path in paths:
     df_temp = load_if_exists(path, name)
     if df_temp is not None:
         subjective_dfs.append(df_temp)
 
-# Combine only what exists
-if len(subjective_dfs) > 0:
-    subjective_df = pd.concat(subjective_dfs, ignore_index=True)
+print(f"Loaded subjective datasets: {len(subjective_dfs)}\n")
+
+# Combine subjective data
+if subjective_dfs:
+    subjective_all = pd.concat(subjective_dfs, ignore_index=True)
 else:
-    print("No subjective data found")
-    subjective_df = pd.DataFrame()
-
-print("\nLoaded subjective datasets:", len(subjective_dfs))
-# ----------------------------
-# STANDARDIZE KEYS
-# ----------------------------
-
-# Rename athlete_id -> player_name so it matches GPS
-if "athlete_id" in subjective_df.columns:
-    subjective_df = subjective_df.rename(columns={"athlete_id": "player_name"})
-
-# Ensure date format matches
-if "date" in subjective_df.columns:
-    subjective_df["date"] = pd.to_datetime(subjective_df["date"], errors="coerce").dt.date
+    subjective_all = None
 
 # ----------------------------
-# COLLECT OBJECTIVE FILES
+# COLLECT PARQUET FILES
 # ----------------------------
 files = []
 
@@ -76,7 +72,7 @@ for root, dirs, filenames in os.walk(DATA_FOLDER):
 
 files.sort()
 
-print(f"\nFound {len(files)} parquet files")
+print(f"Found {len(files)} parquet files")
 print(f"Processing first {MAX_FILES} files...\n")
 
 all_data = []
@@ -91,6 +87,7 @@ def process_file(file_path):
         df = pd.read_parquet(file_path)
     except Exception as e:
         print(f"SKIP: {file_path}")
+        print("Reason:", e)
         return None
 
     keep_cols = [
@@ -103,15 +100,21 @@ def process_file(file_path):
     df = df[[c for c in keep_cols if c in df.columns]]
 
     # ------------------------
-    # DATE (CRITICAL FIX)
+    # FIX DATE PARSING (NO .dt ERROR)
     # ------------------------
     filename = os.path.basename(file_path)
-    df["date"] = pd.to_datetime(filename[:10], errors="coerce").date()
+
+    try:
+        date_val = pd.to_datetime(filename[:10], errors="coerce")
+        df["date"] = date_val.date() if pd.notna(date_val) else None
+    except:
+        df["date"] = None
 
     # ------------------------
     # SORT
     # ------------------------
     if "player_name" in df.columns and "time" in df.columns:
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
         df = df.sort_values(["player_name", "time"])
 
     # ------------------------
@@ -124,6 +127,17 @@ def process_file(file_path):
             df.groupby("player_name")[numeric_cols]
             .transform(lambda x: x.ffill().bfill())
         )
+
+    # ------------------------
+    # MERGE SUBJECTIVE DATA
+    # ------------------------
+    if subjective_all is not None:
+        if "player_name" in df.columns and "date" in df.columns:
+            df = df.merge(
+                subjective_all,
+                on=["player_name", "date"],
+                how="left"
+            )
 
     return df
 
@@ -141,7 +155,6 @@ for i, file_path in enumerate(files[:MAX_FILES]):
         bad_files.append(file_path)
         continue
 
-    # sample to reduce memory
     all_data.append(df.head(500))
 
     del df
@@ -149,57 +162,39 @@ for i, file_path in enumerate(files[:MAX_FILES]):
 
 
 # ----------------------------
-# COMBINE OBJECTIVE DATA
+# COMBINE RESULTS
 # ----------------------------
-print("\nCombining GPS data...\n")
+print("\nCombining results...\n")
 
 if len(all_data) > 0:
     final_df = pd.concat(all_data, ignore_index=True)
+
+    print("===== FINAL DATA SAMPLE =====")
+    print(final_df.head(30))
+
+    print("\nSHAPE:", final_df.shape)
+    print("\nCOLUMNS:", list(final_df.columns))
+
+    # ----------------------------
+    # DEBUG: CHECK MERGE SUCCESS
+    # ----------------------------
+    if subjective_all is not None:
+        print("\n===== MERGE CHECK =====")
+        print(final_df[['player_name', 'date']].drop_duplicates().head())
+
+    # ----------------------------
+    # SHOW ONE ATHLETE
+    # ----------------------------
+    if "player_name" in final_df.columns:
+        sample_player = final_df["player_name"].iloc[0]
+        player_df = final_df[final_df["player_name"] == sample_player]
+
+        print("\n===== ONE ATHLETE OVER TIME =====")
+        print("Athlete:", sample_player)
+        print(player_df.head(30))
+
 else:
-    print("No valid data")
-    exit()
-
-# ----------------------------
-# 🔥 MERGE WITH SUBJECTIVE DATA
-# ----------------------------
-print("\nMerging subjective data...\n")
-
-# Merge on player + date
-final_df = final_df.merge(
-    subjective_df,
-    on=["player_name", "date"],
-    how="left"
-)
-
-# ----------------------------
-# CREATE INJURY TARGET
-# ----------------------------
-# depends on column naming — print to inspect
-print("\nChecking injury columns...")
-print([c for c in final_df.columns if "injury" in c])
-
-# Example: adjust if needed
-if "injury" in final_df.columns:
-    final_df["injury"] = final_df["injury"].fillna(0)
-
-# ----------------------------
-# OUTPUT SAMPLE
-# ----------------------------
-print("\n===== FINAL DATA SAMPLE =====")
-print(final_df.head(30))
-
-print("\nSHAPE:", final_df.shape)
-print("\nCOLUMNS:", list(final_df.columns))
-
-# ----------------------------
-# ONE ATHLETE OVER TIME
-# ----------------------------
-sample_player = final_df["player_name"].iloc[0]
-player_df = final_df[final_df["player_name"] == sample_player]
-
-print("\n===== ONE ATHLETE WITH INJURY DATA =====")
-print("Athlete:", sample_player)
-print(player_df.head(30))
+    print("No valid data processed")
 
 # ----------------------------
 # SUMMARY
