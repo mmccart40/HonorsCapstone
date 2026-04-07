@@ -106,7 +106,7 @@ def process_file(file_path):
     # DATE (CRITICAL FIX)
     # ------------------------
     filename = os.path.basename(file_path)
-    df["date"] = pd.to_datetime(filename[:10], errors="coerce").dt.date
+    df["date"] = pd.to_datetime(filename[:10], errors="coerce").date()
 
     # ------------------------
     # SORT
