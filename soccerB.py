@@ -223,6 +223,26 @@ if len(all_data) > 0:
 else:
     print("No valid data processed")
 
+print("\n===== SUBJECTIVE MERGE COVERAGE =====")
+
+subjective_cols = [c for c in final_df.columns if c not in [
+    'player_name','time','lat','lon','speed','heart_rate',
+    'hacc','hdop','signal_quality','num_satellites',
+    'inst_acc_impulse','accl_x','accl_y','accl_z',
+    'gyro_x','gyro_y','gyro_z','date'
+]]
+
+for col in subjective_cols[:10]:  # check first 10 columns
+    non_null = final_df[col].notna().sum()
+    total = len(final_df)
+    print(f"{col}: {non_null}/{total} ({non_null/total:.2%})")
+
+print("\n===== DATE CHECK =====")
+print("Objective dates:", final_df["date"].dropna().unique()[:5])
+
+if subjective_all is not None:
+    print("Subjective dates:", subjective_all["date"].dropna().unique()[:5])
+
 # ----------------------------
 # SUMMARY
 # ----------------------------
