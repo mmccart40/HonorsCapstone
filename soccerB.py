@@ -17,42 +17,36 @@ def load_if_exists(path, name):
         print(f"Loaded: {path}")
         df = pd.read_csv(path)
 
-        # ------------------------
-        # CLEAN COLUMN NAMES
-        # ------------------------
-        df.columns = df.columns.str.lower().str.replace(" ", "_")
+        # clean column names
+        df.columns = df.columns.str.lower().str.strip().str.replace(" ", "_")
 
+        # fix player id column
+        if "athlete_id" in df.columns:
+            df = df.rename(columns={"athlete_id": "player_name"})
+        elif "player_id" in df.columns:
+            df = df.rename(columns={"player_id": "player_name"})
 
-        if "player_name" in df.columns:
-            df["player_name"] = df["player_name"].astype(str)
-            df["player_name"] = df["player_name"].str.replace("TeamB-", "", regex=False)
-        # ------------------------
-        # FIX PLAYER NAME
-        # ------------------------
+        # ensure player_name exists
         if "player_name" not in df.columns:
-            if "athlete_id" in df.columns:
-                df = df.rename(columns={"athlete_id": "player_name"})
-
-
-        df["player_name"] = df["player_name"].astype(str)
-        df["player_name"] = df["player_name"].str.replace("TeamB-", "", regex=False)
-        # ------------------------
-        # FORCE DATE COLUMN (CRITICAL FIX)
-        # ------------------------
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-
-        elif "datetime" in df.columns:
-            df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
-
-        elif "time" in df.columns:
-            df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
-
-        else:
-            print(f"WARNING: No usable date column in {name}, skipping")
+            print(f"WARNING: no player column in {name}, skipping")
             return None
 
-        # Drop bad rows
+        # standardize player_name format
+        df["player_name"] = df["player_name"].astype(str).str.strip()
+        df["player_name"] = df["player_name"].apply(lambda x: x if x.startswith("TeamB-") else f"TeamB-{x}")
+
+        # create date column
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        elif "datetime" in df.columns:
+            df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
+        elif "time" in df.columns:
+            df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
+        else:
+            print(f"WARNING: no date column in {name}, skipping")
+            return None
+
+        # drop invalid rows
         df = df.dropna(subset=["player_name", "date"])
 
         return df
@@ -81,11 +75,8 @@ for name, path in paths:
 
 print(f"Loaded subjective datasets: {len(subjective_dfs)}\n")
 
-# Combine subjective data
-if subjective_dfs:
-    subjective_all = pd.concat(subjective_dfs, ignore_index=True)
-else:
-    subjective_all = None
+# combine subjective data
+subjective_all = pd.concat(subjective_dfs, ignore_index=True) if subjective_dfs else None
 
 # ----------------------------
 # COLLECT PARQUET FILES
@@ -126,52 +117,32 @@ def process_file(file_path):
 
     df = df[[c for c in keep_cols if c in df.columns]]
 
-    # ------------------------
-    # FIX DATE FROM FILENAME
-    # ------------------------
+    # standardize player_name format
+    if "player_name" in df.columns:
+        df["player_name"] = df["player_name"].astype(str).str.strip()
+        df["player_name"] = df["player_name"].apply(lambda x: x if x.startswith("TeamB-") else f"TeamB-{x}")
+
+    # extract date from filename
     filename = os.path.basename(file_path)
+    date_val = pd.to_datetime(filename[:10], errors="coerce")
+    df["date"] = date_val.date() if pd.notna(date_val) else None
 
-    try:
-        date_val = pd.to_datetime(filename[:10], errors="coerce")
-        df["date"] = date_val.date() if pd.notna(date_val) else None
-    except:
-        df["date"] = None
-
-    # ------------------------
-    # FIX TIME PARSING (no warning)
-    # ------------------------
+    # parse time safely
     if "time" in df.columns:
         df["time"] = pd.to_datetime(df["time"], errors="coerce", format="mixed")
 
-    # ------------------------
-    # SORT
-    # ------------------------
+    # sort data
     if "player_name" in df.columns and "time" in df.columns:
         df = df.sort_values(["player_name", "time"])
 
-    # ------------------------
-    # IMPUTE MISSING VALUES
-    # ------------------------
+    # impute missing numeric values
     numeric_cols = df.select_dtypes(include=["float64", "int64"]).columns
-
     if "player_name" in df.columns and len(numeric_cols) > 0:
-        df[numeric_cols] = (
-            df.groupby("player_name")[numeric_cols]
-            .transform(lambda x: x.ffill().bfill())
-        )
+        df[numeric_cols] = df.groupby("player_name")[numeric_cols].transform(lambda x: x.ffill().bfill())
 
-    # ------------------------
-    # SAFE MERGE SUBJECTIVE DATA
-    # ------------------------
+    # merge subjective data
     if subjective_all is not None:
-        if all(col in df.columns for col in ["player_name", "date"]) and \
-           all(col in subjective_all.columns for col in ["player_name", "date"]):
-
-            df = df.merge(
-                subjective_all,
-                on=["player_name", "date"],
-                how="left"
-            )
+        df = df.merge(subjective_all, on=["player_name", "date"], how="left")
 
     return df
 
@@ -209,16 +180,12 @@ if len(all_data) > 0:
     print("\nSHAPE:", final_df.shape)
     print("\nCOLUMNS:", list(final_df.columns))
 
-    # ----------------------------
-    # MERGE CHECK
-    # ----------------------------
+    # merge check
     if subjective_all is not None:
         print("\n===== MERGE CHECK =====")
         print(final_df[['player_name', 'date']].drop_duplicates().head())
 
-    # ----------------------------
-    # SHOW ONE ATHLETE
-    # ----------------------------
+    # show one athlete
     if "player_name" in final_df.columns:
         sample_player = final_df["player_name"].iloc[0]
         player_df = final_df[final_df["player_name"] == sample_player]
@@ -230,13 +197,17 @@ if len(all_data) > 0:
 else:
     print("No valid data processed")
 
+# ----------------------------
+# SUBJECTIVE VALIDATION
+# ----------------------------
 print("\n===== SUBJECTIVE COLUMNS AFTER MERGE =====")
-subjective_cols = [c for c in final_df.columns if c not in [
+base_cols = [
     'player_name','time','lat','lon','speed','heart_rate',
     'hacc','hdop','signal_quality','num_satellites',
     'inst_acc_impulse','accl_x','accl_y','accl_z',
     'gyro_x','gyro_y','gyro_z','date'
-]]
+]
+subjective_cols = [c for c in final_df.columns if c not in base_cols]
 print(subjective_cols)
 
 print("\n===== SUBJECTIVE MERGE COVERAGE =====")
