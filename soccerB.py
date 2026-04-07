@@ -6,10 +6,48 @@ import pandas as pd
 # CONFIG
 # ----------------------------
 DATA_FOLDER = "/scratch/user/u.mm342941/objective-TeamB-2020"
-MAX_FILES = 50  # safety limit for memory
+SUBJECTIVE_FOLDER = "subjective"
+MAX_FILES = 50
 
 # ----------------------------
-# COLLECT FILES
+# LOAD SUBJECTIVE DATA
+# ----------------------------
+print("Loading subjective data...\n")
+
+def load_subjective(file_path, name):
+    df = pd.read_csv(file_path)
+
+    # clean column names
+    df.columns = df.columns.str.lower()
+    df.columns = df.columns.str.replace(" ", "_")
+    df.columns = df.columns.str.replace(".", "", regex=False)
+
+    df["source"] = name
+    return df
+
+injury_df   = load_subjective(f"{SUBJECTIVE_FOLDER}/injury/injury.csv", "injury")
+wellness_df = load_subjective(f"{SUBJECTIVE_FOLDER}/wellness/wellness.csv", "wellness")
+training_df = load_subjective(f"{SUBJECTIVE_FOLDER}/training-load/training-load.csv", "training")
+
+# Combine all subjective data
+subjective_df = pd.concat([injury_df, wellness_df, training_df], ignore_index=True)
+
+print("Subjective columns:", subjective_df.columns.tolist())
+
+# ----------------------------
+# STANDARDIZE KEYS
+# ----------------------------
+
+# Rename athlete_id -> player_name so it matches GPS
+if "athlete_id" in subjective_df.columns:
+    subjective_df = subjective_df.rename(columns={"athlete_id": "player_name"})
+
+# Ensure date format matches
+if "date" in subjective_df.columns:
+    subjective_df["date"] = pd.to_datetime(subjective_df["date"], errors="coerce").dt.date
+
+# ----------------------------
+# COLLECT OBJECTIVE FILES
 # ----------------------------
 files = []
 
@@ -20,7 +58,7 @@ for root, dirs, filenames in os.walk(DATA_FOLDER):
 
 files.sort()
 
-print(f"Found {len(files)} parquet files")
+print(f"\nFound {len(files)} parquet files")
 print(f"Processing first {MAX_FILES} files...\n")
 
 all_data = []
@@ -31,19 +69,12 @@ bad_files = []
 # ----------------------------
 def process_file(file_path):
 
-    # ------------------------
-    # SAFE PARQUET LOAD
-    # ------------------------
     try:
         df = pd.read_parquet(file_path)
     except Exception as e:
-        print(f"SKIP (corrupt/non-parquet): {file_path}")
-        print("Reason:", e)
+        print(f"SKIP: {file_path}")
         return None
 
-    # ------------------------
-    # COLUMN FILTER (safe)
-    # ------------------------
     keep_cols = [
         'player_name', 'time', 'lat', 'lon', 'speed', 'heart_rate',
         'hacc', 'hdop', 'signal_quality', 'num_satellites',
@@ -54,19 +85,19 @@ def process_file(file_path):
     df = df[[c for c in keep_cols if c in df.columns]]
 
     # ------------------------
-    # ADD DATE FROM FILE NAME (FAST)
+    # DATE (CRITICAL FIX)
     # ------------------------
     filename = os.path.basename(file_path)
-    df["date"] = filename[:10]
+    df["date"] = pd.to_datetime(filename[:10], errors="coerce").dt.date
 
     # ------------------------
-    # SORT BY ATHLETE + TIME
+    # SORT
     # ------------------------
     if "player_name" in df.columns and "time" in df.columns:
         df = df.sort_values(["player_name", "time"])
 
     # ------------------------
-    # IMPUTE MISSING VALUES PER ATHLETE
+    # IMPUTE
     # ------------------------
     numeric_cols = df.select_dtypes(include=["float64", "int64"]).columns
 
@@ -92,7 +123,7 @@ for i, file_path in enumerate(files[:MAX_FILES]):
         bad_files.append(file_path)
         continue
 
-    # keep memory small (sample per file)
+    # sample to reduce memory
     all_data.append(df.head(500))
 
     del df
@@ -100,33 +131,57 @@ for i, file_path in enumerate(files[:MAX_FILES]):
 
 
 # ----------------------------
-# COMBINE RESULTS
+# COMBINE OBJECTIVE DATA
 # ----------------------------
-print("\nCombining results...\n")
+print("\nCombining GPS data...\n")
 
 if len(all_data) > 0:
     final_df = pd.concat(all_data, ignore_index=True)
-
-    print("===== FINAL DATA SAMPLE =====")
-    print(final_df.head(30))
-
-    print("\nSHAPE:", final_df.shape)
-    print("\nCOLUMNS:", list(final_df.columns))
-
-    # ----------------------------
-    # SHOW ONE ATHLETE TIME SERIES
-    # ----------------------------
-    if "player_name" in final_df.columns:
-        sample_player = final_df["player_name"].iloc[0]
-
-        player_df = final_df[final_df["player_name"] == sample_player]
-
-        print("\n===== ONE ATHLETE OVER TIME =====")
-        print("Athlete:", sample_player)
-        print(player_df.head(30))
-
 else:
-    print("No valid data processed")
+    print("No valid data")
+    exit()
+
+# ----------------------------
+# 🔥 MERGE WITH SUBJECTIVE DATA
+# ----------------------------
+print("\nMerging subjective data...\n")
+
+# Merge on player + date
+final_df = final_df.merge(
+    subjective_df,
+    on=["player_name", "date"],
+    how="left"
+)
+
+# ----------------------------
+# CREATE INJURY TARGET
+# ----------------------------
+# depends on column naming — print to inspect
+print("\nChecking injury columns...")
+print([c for c in final_df.columns if "injury" in c])
+
+# Example: adjust if needed
+if "injury" in final_df.columns:
+    final_df["injury"] = final_df["injury"].fillna(0)
+
+# ----------------------------
+# OUTPUT SAMPLE
+# ----------------------------
+print("\n===== FINAL DATA SAMPLE =====")
+print(final_df.head(30))
+
+print("\nSHAPE:", final_df.shape)
+print("\nCOLUMNS:", list(final_df.columns))
+
+# ----------------------------
+# ONE ATHLETE OVER TIME
+# ----------------------------
+sample_player = final_df["player_name"].iloc[0]
+player_df = final_df[final_df["player_name"] == sample_player]
+
+print("\n===== ONE ATHLETE WITH INJURY DATA =====")
+print("Athlete:", sample_player)
+print(player_df.head(30))
 
 # ----------------------------
 # SUMMARY
