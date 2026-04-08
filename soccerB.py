@@ -207,6 +207,13 @@ for i, file_path in enumerate(files[:MAX_FILES]):
     del df
     gc.collect()
 
+print("\nOBJECTIVE DATE RANGE:", df["date"].min(), "to", df["date"].max())
+
+if subjective_all is not None:
+    print("SUBJECTIVE DATE RANGE:",
+          subjective_all["date"].min(),
+          "to",
+          subjective_all["date"].max())
 
 # ----------------------------
 # FINAL COMBINE
