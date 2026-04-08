@@ -40,39 +40,60 @@ def load_subjective(path, name):
         print(f"Missing: {path}")
         return None
 
-    print(f"Loading subjective: {name}")
-    df = pd.read_csv(path)
+    print(f"\nLoading subjective: {name}")
+
+    # robust CSV read
+    df = pd.read_csv(
+        path,
+        engine="python",
+        on_bad_lines="skip"
+    )
+
+    print("Raw shape:", df.shape)
 
     df.columns = df.columns.str.lower().str.strip().str.replace(" ", "_")
 
-    # player column
-    if "athlete_id" in df.columns:
-        df = df.rename(columns={"athlete_id": "player_name"})
-    elif "player_id" in df.columns:
-        df = df.rename(columns={"player_id": "player_name"})
+    print("Columns:", df.columns.tolist())
 
+    # ----------------------------
+    # PLAYER NAME FIX
+    # ----------------------------
     if "player_name" not in df.columns:
-        print(f"Skipping {name} (no player_name)")
+        print("No player_name column. Skipping.")
         return None
 
     df["player_name"] = df["player_name"].apply(clean_player_name)
 
-    # date column
-    date_cols = ["timestamp", "time", "datetime", "date"]
-
-    for col in date_cols:
-        if col in df.columns:
-            df["date"] = safe_parse_date(df[col])
-            break
-
-    if "date" not in df.columns:
-        print(f"Skipping {name} (no date)")
+    # ----------------------------
+    # DATE FIX (CRITICAL)
+    # ----------------------------
+    if "timestamp" in df.columns:
+        print("Parsing timestamp with %d.%m.%Y")
+        df["date"] = pd.to_datetime(
+            df["timestamp"].astype(str).str.strip(),
+            format="%d.%m.%Y",
+            errors="coerce"
+        ).dt.date
+    else:
+        print("No timestamp column. Skipping.")
         return None
 
+    print("Parsed date nulls:", df["date"].isna().sum(), "/", len(df))
+
+    # ----------------------------
+    # CLEAN
+    # ----------------------------
+    before = len(df)
     df = df.dropna(subset=["player_name", "date"])
+    after = len(df)
+
+    print(f"Rows after cleaning: {after} (dropped {before - after})")
+
+    if after == 0:
+        print("All rows dropped. Skipping dataset.")
+        return None
 
     return df
-
 
 # ----------------------------
 # LOAD ALL SUBJECTIVE
