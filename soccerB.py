@@ -1,222 +1,217 @@
+import os
+import gc
 import pandas as pd
-import numpy as np
-import glob
 
-# =========================
-# HELPERS
-# =========================
+# ----------------------------
+# CONFIG
+# ----------------------------
+DATA_FOLDER = "/scratch/user/u.mm342941/objective-TeamB-2020"
+SUBJECTIVE_FOLDER = "subjective"
+MAX_FILES = 50
+ROWS_PER_FILE = 200   # reduce memory usage
 
-def find_timestamp_column(df):
-    candidates = [
-        "timestamp", "time", "datetime",
-        "date_time", "event_time", "eventtime"
+# ----------------------------
+# SAFE DATE PARSER
+# ----------------------------
+def safe_parse_date(series):
+    try:
+        return pd.to_datetime(series, format="ISO8601", errors="coerce").dt.date
+    except:
+        return pd.to_datetime(series, errors="coerce").dt.date
+
+
+# ----------------------------
+# STANDARDIZE PLAYER NAME
+# ----------------------------
+def clean_player_name(x):
+    x = str(x).strip()
+    x = x.replace("TeamA-", "")
+    if not x.startswith("TeamB-"):
+        x = f"TeamB-{x}"
+    return x
+
+
+# ----------------------------
+# LOAD SUBJECTIVE FILES
+# ----------------------------
+def load_subjective(path, name):
+
+    if not os.path.exists(path):
+        print(f"Missing: {path}")
+        return None
+
+    print(f"Loading subjective: {name}")
+    df = pd.read_csv(path)
+
+    df.columns = df.columns.str.lower().str.strip().str.replace(" ", "_")
+
+    # player column
+    if "athlete_id" in df.columns:
+        df = df.rename(columns={"athlete_id": "player_name"})
+    elif "player_id" in df.columns:
+        df = df.rename(columns={"player_id": "player_name"})
+
+    if "player_name" not in df.columns:
+        print(f"Skipping {name} (no player_name)")
+        return None
+
+    df["player_name"] = df["player_name"].apply(clean_player_name)
+
+    # date column
+    date_cols = ["timestamp", "time", "datetime", "date"]
+
+    for col in date_cols:
+        if col in df.columns:
+            df["date"] = safe_parse_date(df[col])
+            break
+
+    if "date" not in df.columns:
+        print(f"Skipping {name} (no date)")
+        return None
+
+    df = df.dropna(subset=["player_name", "date"])
+
+    return df
+
+
+# ----------------------------
+# LOAD ALL SUBJECTIVE
+# ----------------------------
+print("Loading subjective data...")
+
+paths = [
+    ("injury", f"{SUBJECTIVE_FOLDER}/injury/injury.csv"),
+    ("wellness", f"{SUBJECTIVE_FOLDER}/wellness/wellness.csv"),
+    ("training", f"{SUBJECTIVE_FOLDER}/training-load/training-load.csv"),
+    ("performance", f"{SUBJECTIVE_FOLDER}/game-performance/game-performance.csv"),
+    ("illness", f"{SUBJECTIVE_FOLDER}/illness/illness.csv"),
+]
+
+subjective_dfs = []
+
+for name, path in paths:
+    df = load_subjective(path, name)
+    if df is not None:
+        subjective_dfs.append(df)
+
+subjective_all = pd.concat(subjective_dfs, ignore_index=True) if subjective_dfs else None
+
+if subjective_all is not None:
+    print("Subjective rows:", len(subjective_all))
+    print("Unique players:", subjective_all["player_name"].nunique())
+
+
+# ----------------------------
+# FIND PARQUET FILES
+# ----------------------------
+files = []
+
+for root, dirs, filenames in os.walk(DATA_FOLDER):
+    for f in filenames:
+        if f.endswith(".parquet"):
+            files.append(os.path.join(root, f))
+
+files.sort()
+print("Total parquet files:", len(files))
+
+
+# ----------------------------
+# PROCESS FILE
+# ----------------------------
+def process_file(file_path):
+
+    try:
+        df = pd.read_parquet(file_path)
+    except Exception as e:
+        print("Skipping file:", file_path)
+        return None
+
+    keep_cols = [
+        "player_name", "time", "speed", "heart_rate",
+        "accl_x", "accl_y", "accl_z"
     ]
 
-    for c in candidates:
-        if c in df.columns:
-            return c
+    df = df[[c for c in keep_cols if c in df.columns]]
 
-    return None
+    if "player_name" not in df.columns:
+        return None
+
+    df["player_name"] = df["player_name"].apply(clean_player_name)
+
+    # extract date from filename (FAST + RELIABLE)
+    filename = os.path.basename(file_path)
+    date_val = pd.to_datetime(filename[:10], format="%Y-%m-%d", errors="coerce")
+
+    if pd.isna(date_val):
+        return None
+
+    df["date"] = date_val.date()
+
+    # reduce size early
+    df = df.head(ROWS_PER_FILE)
+
+    # convert time safely
+    if "time" in df.columns:
+        df["time"] = pd.to_datetime(df["time"], format="ISO8601", errors="coerce")
+
+    # numeric optimization
+    for col in df.select_dtypes(include=["float64"]).columns:
+        df[col] = pd.to_numeric(df[col], downcast="float")
+
+    # merge subjective
+    if subjective_all is not None:
+        df = df.merge(subjective_all, on=["player_name", "date"], how="left")
+
+    return df
 
 
-def safe_to_date(df, col):
-    return pd.to_datetime(df[col], errors="coerce").dt.date
+# ----------------------------
+# MAIN LOOP
+# ----------------------------
+all_data = []
+bad_files = []
 
+for i, file_path in enumerate(files[:MAX_FILES]):
 
-# =========================
-# LOAD OBJECTIVE DATA
-# =========================
+    print(f"[{i+1}/{MAX_FILES}] Processing")
 
-objective_files = glob.glob(
-    "/scratch/user/u.mm342941/objective-TeamB-2020/**/*.parquet",
-    recursive=True
-)
+    df = process_file(file_path)
 
-objective_list = []
-bad_obj_files = 0
-
-for file in objective_files:
-    print("[OBJECTIVE] Loading:", file)
-
-    try:
-        df = pd.read_parquet(file)
-
-        ts_col = find_timestamp_column(df)
-
-        if ts_col is None:
-            print("SKIP: no timestamp column")
-            bad_obj_files += 1
-            continue
-
-        df["date"] = safe_to_date(df, ts_col)
-        df = df.dropna(subset=["date"])
-
-        if df.empty:
-            print("SKIP: empty after date parsing")
-            bad_obj_files += 1
-            continue
-
-        if "player_name" not in df.columns:
-            print("SKIP: no player_name column")
-            bad_obj_files += 1
-            continue
-
-        df["player_name"] = df["player_name"].astype(str).str.strip()
-
-        objective_list.append(df)
-
-    except Exception as e:
-        print("FAILED FILE:", file)
-        print("ERROR:", e)
-        bad_obj_files += 1
+    if df is None:
+        bad_files.append(file_path)
         continue
 
+    all_data.append(df)
 
-objective = pd.concat(objective_list, ignore_index=True)
-
-print("\nOBJECTIVE RAW SHAPE:", objective.shape)
-print("BAD OBJECTIVE FILES:", bad_obj_files)
-
-
-# =========================
-# AGGREGATE OBJECTIVE TO PLAYER-DAY
-# =========================
-
-numeric_cols = objective.select_dtypes(include=[np.number]).columns.tolist()
-agg_dict = {c: "mean" for c in numeric_cols}
-
-objective_daily = (
-    objective
-    .groupby(["player_name", "date"])
-    .agg(agg_dict)
-    .reset_index()
-)
-
-print("OBJECTIVE DAILY SHAPE:", objective_daily.shape)
+    del df
+    gc.collect()
 
 
-# =========================
-# LOAD SUBJECTIVE DATA
-# =========================
+# ----------------------------
+# FINAL COMBINE
+# ----------------------------
+print("Combining...")
 
-subjective_files = glob.glob(
-    "/scratch/user/u.mm342941/subjective-TeamB/**/*.parquet",
-    recursive=True
-)
+if len(all_data) > 0:
+    final_df = pd.concat(all_data, ignore_index=True)
 
-subjective_list = []
-bad_sub_files = 0
+    print("Final shape:", final_df.shape)
+    print("Columns:", list(final_df.columns))
 
-for file in subjective_files:
-    print("[SUBJECTIVE] Loading:", file)
+    if subjective_all is not None:
+        merged_cols = [c for c in subjective_all.columns if c in final_df.columns]
 
-    try:
-        df = pd.read_parquet(file)
+        if merged_cols:
+            coverage = final_df[merged_cols].notna().mean()
+            print("\nMerge coverage:")
+            print(coverage.sort_values(ascending=False).head(10))
 
-        if "player_name" not in df.columns:
-            print("SKIP: no player_name")
-            bad_sub_files += 1
-            continue
-
-        df["player_name"] = (
-            df["player_name"]
-            .astype(str)
-            .str.replace(r"^TeamB-TeamA-", "TeamB-", regex=True)
-            .str.strip()
-        )
-
-        ts_col = find_timestamp_column(df)
-
-        if ts_col is None:
-            print("SKIP: no timestamp column")
-            bad_sub_files += 1
-            continue
-
-        df["date"] = safe_to_date(df, ts_col)
-        df = df.dropna(subset=["date"])
-
-        if df.empty:
-            print("SKIP: empty after date parsing")
-            bad_sub_files += 1
-            continue
-
-        subjective_list.append(df)
-
-    except Exception as e:
-        print("FAILED SUBJECTIVE FILE:", file)
-        print("ERROR:", e)
-        bad_sub_files += 1
-        continue
+else:
+    print("No data processed")
 
 
-subjective = pd.concat(subjective_list, ignore_index=True)
-
-print("\nSUBJECTIVE RAW SHAPE:", subjective.shape)
-print("BAD SUBJECTIVE FILES:", bad_sub_files)
-
-
-# =========================
-# AGGREGATE SUBJECTIVE TO PLAYER-DAY
-# =========================
-
-subjective_daily = (
-    subjective
-    .groupby(["player_name", "date"])
-    .agg({
-        "team_performance": "mean",
-        "offensive_performance": "mean",
-        "defensive_performance": "mean",
-        "problems": "first"
-    })
-    .reset_index()
-)
-
-print("SUBJECTIVE DAILY SHAPE:", subjective_daily.shape)
-
-
-# =========================
-# ALIGN DATE RANGE
-# =========================
-
-common_start = max(objective_daily["date"].min(), subjective_daily["date"].min())
-common_end = min(objective_daily["date"].max(), subjective_daily["date"].max())
-
-print("\nCOMMON DATE RANGE:", common_start, "->", common_end)
-
-objective_daily = objective_daily[
-    objective_daily["date"].between(common_start, common_end)
-]
-
-subjective_daily = subjective_daily[
-    subjective_daily["date"].between(common_start, common_end)
-]
-
-
-# =========================
-# MERGE
-# =========================
-
-final_df = objective_daily.merge(
-    subjective_daily,
-    on=["player_name", "date"],
-    how="left"
-)
-
-print("\nFINAL SHAPE:", final_df.shape)
-
-
-# =========================
-# DEBUG CHECKS
-# =========================
-
-print("\nMERGE COVERAGE:")
-print(final_df["team_performance"].notna().mean())
-
-print("\nSAMPLE:")
-print(final_df.head(10))
-
-print("\nNULL RATE:")
-print(final_df.isna().mean().sort_values(ascending=False))
-
-print("\nBAD OBJECTIVE FILES:", bad_obj_files)
-print("BAD SUBJECTIVE FILES:", bad_sub_files)
+# ----------------------------
+# SUMMARY
+# ----------------------------
+print("Done")
+print("Bad files:", len(bad_files))
