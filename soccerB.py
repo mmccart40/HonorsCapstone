@@ -35,7 +35,6 @@ def load_subjective(path, name):
 
     df["player_name"] = df["player_name"].apply(clean_player_name)
 
-    # FIXED: explicit date format (no warnings)
     if "timestamp" in df.columns:
         df["date"] = pd.to_datetime(
             df["timestamp"],
@@ -49,7 +48,7 @@ def load_subjective(path, name):
     df = df.dropna(subset=["player_name", "date"])
     print(f"Rows after cleaning: {len(df)} (dropped {before - len(df)})")
 
-    df = df.sort_values(["player_name", "date"])
+    df = df.sort_values(["player_name", "date"]).reset_index(drop=True)
 
     return df
 
@@ -106,7 +105,6 @@ def process_file(file_path):
 
     df["player_name"] = df["player_name"].apply(clean_player_name)
 
-    # Extract date from filename
     filename = os.path.basename(file_path)
     date_val = pd.to_datetime(
         filename[:10],
@@ -119,7 +117,7 @@ def process_file(file_path):
 
     df["date"] = date_val
 
-    # Reduce size: aggregate per player-day
+    # Aggregate to avoid memory issues
     df = df.groupby(["player_name", "date"]).agg({
         "speed": ["mean", "max"],
         "heart_rate": ["mean", "max"],
@@ -172,24 +170,39 @@ if len(all_data) == 0:
 
 final_df = pd.concat(all_data, ignore_index=True)
 
+final_df = final_df.sort_values(["player_name", "date"]).reset_index(drop=True)
+
 print("\nObjective date range:",
       final_df["date"].min(),
       "to",
       final_df["date"].max())
 
 # ----------------------------
-# FIX: MERGE USING NEAREST DATE
+# MERGE (PER PLAYER, FIXED)
 # ----------------------------
-final_df = final_df.sort_values(["player_name", "date"])
-subjective_all = subjective_all.sort_values(["player_name", "date"])
+merged_list = []
 
-merged = pd.merge_asof(
-    final_df,
-    subjective_all,
-    on="date",
-    by="player_name",
-    direction="backward"
-)
+players = final_df["player_name"].unique()
+
+for player in players:
+
+    left = final_df[final_df["player_name"] == player].sort_values("date").reset_index(drop=True)
+    right = subjective_all[subjective_all["player_name"] == player].sort_values("date").reset_index(drop=True)
+
+    if len(right) == 0:
+        merged_list.append(left)
+        continue
+
+    merged_player = pd.merge_asof(
+        left,
+        right,
+        on="date",
+        direction="backward"
+    )
+
+    merged_list.append(merged_player)
+
+merged = pd.concat(merged_list, ignore_index=True)
 
 # ----------------------------
 # RESULTS
