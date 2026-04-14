@@ -1,219 +1,228 @@
-import os
-import gc
 import pandas as pd
+import numpy as np
+import glob
+import os
 
-# ----------------------------
-# CONFIG
-# ----------------------------
-DATA_FOLDER = "/scratch/user/u.mm342941/objective-TeamA-2020"
-SUBJECTIVE_FOLDER = "subjective"
-MAX_FILES = 50
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
 
-# ----------------------------
-# CLEAN PLAYER NAME
-# ----------------------------
-def clean_player_name(x):
-    return str(x).strip()
+OBJECTIVE_PATH = "/scratch/user/u.mm342941/objective-TeamA-2020/**/*.parquet"
 
-# ----------------------------
+SUBJECTIVE_PATHS = {
+    "injury": "subjective/injury/injury.csv",
+    "performance": "subjective/game-performance/game-performance.csv",
+    "illness": "subjective/illness/illness.csv"
+}
+
+# -------------------------
+# CLEAN PLAYER IDS
+# -------------------------
+def clean_player_name(name):
+    if pd.isna(name):
+        return name
+    name = str(name)
+    name = name.replace("TeamA-TeamA-", "TeamA-")
+    return name
+
+# -------------------------
 # LOAD SUBJECTIVE DATA
-# ----------------------------
-def load_subjective(path, name):
-    if not os.path.exists(path):
-        print("Missing:", path)
-        return None
+# -------------------------
+def load_subjective():
+    dfs = []
 
-    print("\nLoading subjective:", name)
+    for key, path in SUBJECTIVE_PATHS.items():
+        if not os.path.exists(path):
+            print("Missing:", path)
+            continue
 
-    df = pd.read_csv(path)
-    print("Raw shape:", df.shape)
+        print("\nLoading subjective:", key)
+        df = pd.read_csv(path)
 
-    df.columns = df.columns.str.lower().str.strip()
+        df["player_name"] = df["player_name"].apply(clean_player_name)
 
-    if "player_name" not in df.columns:
-        return None
-
-    df["player_name"] = df["player_name"].apply(clean_player_name)
-
-    if "timestamp" in df.columns:
-        df["date"] = pd.to_datetime(
+        df["timestamp"] = pd.to_datetime(
             df["timestamp"],
             format="%d.%m.%Y",
             errors="coerce"
         )
-    else:
-        return None
 
-    before = len(df)
-    df = df.dropna(subset=["player_name", "date"])
-    print(f"Rows after cleaning: {len(df)} (dropped {before - len(df)})")
+        df = df.dropna(subset=["timestamp"])
+        df["date"] = df["timestamp"].dt.floor("D")
 
-    df = df.sort_values(["player_name", "date"]).reset_index(drop=True)
+        dfs.append(df)
+
+        print("Rows:", len(df))
+
+    full = pd.concat(dfs, ignore_index=True)
+
+    print("\nSubjective rows:", len(full))
+    print("Unique players:", full["player_name"].nunique())
+
+    return full
+
+# -------------------------
+# LOAD OBJECTIVE DATA
+# -------------------------
+def load_objective():
+    files = sorted(glob.glob(OBJECTIVE_PATH, recursive=True))
+
+    print("\nTotal objective files:", len(files))
+
+    dfs = []
+
+    for i, f in enumerate(files):
+        if i % 100 == 0:
+            print(f"Processing file {i}/{len(files)}")
+
+        try:
+            df = pd.read_parquet(f)
+
+            if "time" not in df.columns:
+                continue
+
+            df["player_name"] = df["player_name"].apply(clean_player_name)
+
+            df["date"] = pd.to_datetime(df["time"], unit="s").dt.floor("D")
+
+            dfs.append(df)
+
+        except:
+            continue
+
+    full = pd.concat(dfs, ignore_index=True)
+
+    print("\nObjective shape:", full.shape)
+    print("Date range:", full["date"].min(), "to", full["date"].max())
+
+    return full
+
+# -------------------------
+# FEATURE ENGINEERING
+# -------------------------
+def build_features(df):
+    df = df.sort_values(["player_name", "date"])
+
+    # rolling features per player
+    df["speed_mean_3d"] = df.groupby("player_name")["speed"].transform(
+        lambda x: x.rolling(3, min_periods=1).mean()
+    )
+
+    df["speed_std_3d"] = df.groupby("player_name")["speed"].transform(
+        lambda x: x.rolling(3, min_periods=1).std()
+    )
+
+    df["hr_mean_3d"] = df.groupby("player_name")["heart_rate"].transform(
+        lambda x: x.rolling(3, min_periods=1).mean()
+    )
+
+    df["accl_mag"] = np.sqrt(df["accl_x"]**2 + df["accl_y"]**2 + df["accl_z"]**2)
+
+    df["accl_mean_3d"] = df.groupby("player_name")["accl_mag"].transform(
+        lambda x: x.rolling(3, min_periods=1).mean()
+    )
 
     return df
 
-# ----------------------------
-# LOAD ALL SUBJECTIVE FILES
-# ----------------------------
-print("Loading subjective data...")
+# -------------------------
+# CREATE INJURY LABEL
+# -------------------------
+def create_labels(objective, subjective):
+    injury = subjective[subjective["type"].notna()].copy()
 
-paths = [
-    ("injury", "subjective/injury/injury.csv"),
-    ("performance", "subjective/game-performance/game-performance.csv"),
-    ("illness", "subjective/illness/illness.csv"),
-    ("wellness", "subjective/wellness/wellness.csv"),
-    ("training", "subjective/training-load/training-load.csv"),
-]
+    injury_dates = injury.groupby("player_name")["date"].apply(list).to_dict()
 
-subjective_dfs = []
+    labels = []
 
-for name, path in paths:
-    df = load_subjective(path, name)
-    if df is not None:
-        subjective_dfs.append(df)
+    for _, row in objective.iterrows():
+        player = row["player_name"]
+        date = row["date"]
 
-if len(subjective_dfs) == 0:
-    print("No subjective data loaded")
-    exit()
+        future_injury = False
 
-subjective_all = pd.concat(subjective_dfs, ignore_index=True)
+        if player in injury_dates:
+            for d in injury_dates[player]:
+                if date < d <= date + pd.Timedelta(days=7):
+                    future_injury = True
+                    break
 
-print("\nSubjective rows:", len(subjective_all))
-print("Unique players:", subjective_all["player_name"].nunique())
-print("Date range:", subjective_all["date"].min(), "to", subjective_all["date"].max())
+        labels.append(int(future_injury))
 
-# ----------------------------
-# PROCESS OBJECTIVE FILE
-# ----------------------------
-def process_file(file_path):
+    objective["injury_next_7d"] = labels
 
-    try:
-        df = pd.read_parquet(file_path)
-    except:
-        print("Skipping file:", file_path)
-        return None
+    return objective
 
-    keep_cols = [
-        "player_name", "time", "speed",
-        "heart_rate", "accl_x", "accl_y", "accl_z"
+# -------------------------
+# BUILD MODEL DATASET
+# -------------------------
+def build_dataset(obj, sub):
+    obj = build_features(obj)
+    obj = create_labels(obj, sub)
+
+    features = [
+        "speed",
+        "heart_rate",
+        "accl_x",
+        "accl_y",
+        "accl_z",
+        "speed_mean_3d",
+        "speed_std_3d",
+        "hr_mean_3d",
+        "accl_mean_3d"
     ]
 
-    df = df[[c for c in keep_cols if c in df.columns]]
+    obj = obj.dropna(subset=features + ["injury_next_7d"])
 
-    if "player_name" not in df.columns:
-        return None
+    X = obj[features]
+    y = obj["injury_next_7d"]
 
-    df["player_name"] = df["player_name"].apply(clean_player_name)
+    return X, y
 
-    filename = os.path.basename(file_path)
-    date_val = pd.to_datetime(
-        filename[:10],
-        format="%Y-%m-%d",
-        errors="coerce"
+# -------------------------
+# TRAIN MODEL
+# -------------------------
+def train_model(X, y):
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y,
+        test_size=0.2,
+        random_state=42,
+        stratify=y
     )
 
-    if pd.isna(date_val):
-        return None
-
-    df["date"] = date_val
-
-    # Aggregate to avoid memory issues
-    df = df.groupby(["player_name", "date"]).agg({
-        "speed": ["mean", "max"],
-        "heart_rate": ["mean", "max"],
-        "accl_x": "mean",
-        "accl_y": "mean",
-        "accl_z": "mean"
-    }).reset_index()
-
-    df.columns = ["_".join(col).strip("_") for col in df.columns]
-
-    return df
-
-# ----------------------------
-# COLLECT PARQUET FILES
-# ----------------------------
-files = []
-
-for root, _, filenames in os.walk(DATA_FOLDER):
-    for f in filenames:
-        if f.endswith(".parquet"):
-            files.append(os.path.join(root, f))
-
-files.sort()
-
-print("\nTotal parquet files:", len(files))
-
-# ----------------------------
-# PROCESS OBJECTIVE FILES
-# ----------------------------
-all_data = []
-bad_files = []
-
-for i, file_path in enumerate(files[:MAX_FILES]):
-    print(f"[{i+1}/{MAX_FILES}] Processing")
-
-    df = process_file(file_path)
-
-    if df is None:
-        bad_files.append(file_path)
-        continue
-
-    all_data.append(df)
-
-    del df
-    gc.collect()
-
-if len(all_data) == 0:
-    print("No objective data processed")
-    exit()
-
-final_df = pd.concat(all_data, ignore_index=True)
-
-final_df = final_df.sort_values(["player_name", "date"]).reset_index(drop=True)
-
-print("\nObjective date range:",
-      final_df["date"].min(),
-      "to",
-      final_df["date"].max())
-
-# ----------------------------
-# MERGE (PER PLAYER, FIXED)
-# ----------------------------
-merged_list = []
-
-players = final_df["player_name"].unique()
-
-for player in players:
-
-    left = final_df[final_df["player_name"] == player].sort_values("date").reset_index(drop=True)
-    right = subjective_all[subjective_all["player_name"] == player].sort_values("date").reset_index(drop=True)
-
-    if len(right) == 0:
-        merged_list.append(left)
-        continue
-
-    merged_player = pd.merge_asof(
-        left,
-        right,
-        on="date",
-        direction="backward"
+    model = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=8,
+        random_state=42
     )
 
-    merged_list.append(merged_player)
+    model.fit(X_train, y_train)
 
-merged = pd.concat(merged_list, ignore_index=True)
+    preds = model.predict(X_test)
 
-# ----------------------------
-# RESULTS
-# ----------------------------
-print("\nFinal shape:", merged.shape)
+    print("\nMODEL RESULTS")
+    print(classification_report(y_test, preds))
 
-print("\nMerge coverage:")
-print(merged.notna().mean())
+    return model
 
-print("\nSample merged rows:")
-print(merged.dropna().head())
+# -------------------------
+# MAIN
+# -------------------------
+def main():
+    print("Loading subjective...")
+    subjective = load_subjective()
 
-print("\nDone")
-print("Bad files:", len(bad_files))
+    print("\nLoading objective...")
+    objective = load_objective()
+
+    print("\nBuilding dataset...")
+    X, y = build_dataset(objective, subjective)
+
+    print("\nFinal dataset size:", X.shape)
+
+    print("\nTraining model...")
+    model = train_model(X, y)
+
+    print("\nDone")
+
+if __name__ == "__main__":
+    main()
