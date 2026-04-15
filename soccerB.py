@@ -1,154 +1,151 @@
 import pandas as pd
-import numpy as np
 import glob
 import os
+import gc
 
+# -----------------------
+# CONFIG
+# -----------------------
 OBJECTIVE_PATH = "/scratch/user/u.mm342941/objective-TeamA-2020/**/*.parquet"
+CHUNK_SIZE = 50
+OUTPUT_FILE = "objective_aggregated.csv"
 
-SUBJECTIVE_PATHS = {
-    "injury": "subjective/injury/injury.csv",
-    "performance": "subjective/game-performance/game-performance.csv",
-    "illness": "subjective/illness/illness.csv"
-}
-
-WINDOW_DAYS = 7
-
-def clean_player_name(name):
-    if pd.isna(name):
-        return name
-    return str(name).replace("TeamA-TeamA-", "TeamA-")
-
-# ----------------------------
-# SUBJECTIVE
-# ----------------------------
+# -----------------------
+# LOAD SUBJECTIVE
+# -----------------------
 def load_subjective():
     dfs = []
 
-    for key, path in SUBJECTIVE_PATHS.items():
-        if not os.path.exists(path):
-            print("Missing:", path)
-            continue
+    def load_csv(path):
+        if os.path.exists(path):
+            df = pd.read_csv(path)
+            df["date"] = pd.to_datetime(df["timestamp"], format="%d.%m.%Y", errors="coerce")
+            return df
+        return pd.DataFrame()
 
-        print("\nLoading:", key)
-        df = pd.read_csv(path)
+    injury = load_csv("subjective/injury/injury.csv")
+    performance = load_csv("subjective/game-performance/performance.csv")
+    illness = load_csv("subjective/illness/illness.csv")
 
-        df["timestamp"] = pd.to_datetime(
-            df["timestamp"],
-            format="%d.%m.%Y",
-            errors="coerce"
-        )
+    dfs = [df for df in [injury, performance, illness] if not df.empty]
+    subjective = pd.concat(dfs, ignore_index=True)
 
-        df = df.dropna(subset=["timestamp"])
-        df["date"] = df["timestamp"].dt.floor("D")
-        df["player_name"] = df["player_name"].apply(clean_player_name)
+    return subjective
 
-        dfs.append(df)
+subjective = load_subjective()
+print("Subjective rows:", len(subjective))
 
-    combined = pd.concat(dfs, ignore_index=True)
+# -----------------------
+# PROCESS OBJECTIVE IN CHUNKS
+# -----------------------
+files = glob.glob(OBJECTIVE_PATH, recursive=True)
+print("Total files:", len(files))
 
-    print("Subjective rows:", len(combined))
-    return combined
+# remove old file
+if os.path.exists(OUTPUT_FILE):
+    os.remove(OUTPUT_FILE)
 
-# ----------------------------
-# OBJECTIVE (MEMORY SAFE)
-# ----------------------------
-def process_objective():
-    files = glob.glob(OBJECTIVE_PATH, recursive=True)
+def process_chunk(file_chunk):
+    results = []
 
-    print("Total files:", len(files))
-
-    aggregated_rows = []
-
-    for i, f in enumerate(files):
-        print(f"[{i+1}/{len(files)}]")
-
+    for f in file_chunk:
         try:
             df = pd.read_parquet(f)
 
-            if "time" not in df.columns:
+            if "player_name" not in df.columns:
                 continue
 
-            df["date"] = pd.to_datetime(df["time"], unit="s").dt.floor("D")
-            df["player_name"] = df["player_name"].apply(clean_player_name)
+            # DATE HANDLING
+            if "timestamp" in df.columns:
+                df["date"] = pd.to_datetime(df["timestamp"], errors="coerce").dt.date
+            elif "time" in df.columns:
+                df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
+            else:
+                continue
 
-            # compute features
-            df["acc_mag"] = np.sqrt(
-                df["accl_x"]**2 + df["accl_y"]**2 + df["accl_z"]**2
-            )
+            df = df.dropna(subset=["date", "player_name"])
 
+            # AGGREGATE
             agg = df.groupby(["player_name", "date"]).agg({
                 "speed": ["mean", "max"],
                 "heart_rate": ["mean", "max"],
-                "acc_mag": "mean"
+                "accl_x": "mean",
+                "accl_y": "mean",
+                "accl_z": "mean"
             }).reset_index()
 
             agg.columns = [
                 "player_name", "date",
                 "speed_mean", "speed_max",
                 "heart_rate_mean", "heart_rate_max",
-                "acc_mag_mean"
+                "accl_x_mean", "accl_y_mean", "accl_z_mean"
             ]
 
-            aggregated_rows.append(agg)
+            results.append(agg)
 
-            # IMPORTANT: delete raw df immediately
-            del df
+        except Exception:
+            continue
 
-        except Exception as e:
-            print("Skipping:", f)
-            print(e)
+    if results:
+        return pd.concat(results, ignore_index=True)
+    return pd.DataFrame()
 
-    combined = pd.concat(aggregated_rows, ignore_index=True)
+# -----------------------
+# RUN CHUNKS
+# -----------------------
+for i in range(0, len(files), CHUNK_SIZE):
+    chunk = files[i:i+CHUNK_SIZE]
+    print(f"Processing chunk {i//CHUNK_SIZE + 1}")
 
-    print("Objective rows:", len(combined))
-    return combined
+    df_chunk = process_chunk(chunk)
 
-# ----------------------------
-# LABELING
-# ----------------------------
-def create_labels(objective, subjective):
-    injury = subjective[subjective["type"].notna()]
+    if not df_chunk.empty:
+        df_chunk.to_csv(
+            OUTPUT_FILE,
+            mode="a",
+            header=not os.path.exists(OUTPUT_FILE),
+            index=False
+        )
 
-    objective = objective.sort_values(["player_name", "date"])
-    injury = injury.sort_values(["player_name", "date"])
+    del df_chunk
+    gc.collect()
 
-    labels = []
+# -----------------------
+# LOAD AGGREGATED OBJECTIVE
+# -----------------------
+objective = pd.read_csv(OUTPUT_FILE)
+objective["date"] = pd.to_datetime(objective["date"])
 
-    for _, row in objective.iterrows():
-        player = row["player_name"]
-        date = row["date"]
+# -----------------------
+# CLEAN PLAYER NAMES
+# -----------------------
+def clean_name(x):
+    return str(x).replace("TeamA-", "").replace("TeamB-", "")
 
-        future = injury[
-            (injury["player_name"] == player) &
-            (injury["date"] > date) &
-            (injury["date"] <= date + pd.Timedelta(days=WINDOW_DAYS))
-        ]
+objective["player_id"] = objective["player_name"].apply(clean_name)
+subjective["player_id"] = subjective["player_name"].apply(clean_name)
 
-        labels.append(1 if len(future) > 0 else 0)
+# -----------------------
+# MERGE (IMPORTANT FIX)
+# -----------------------
+merged = pd.merge(
+    objective,
+    subjective,
+    on=["player_id", "date"],
+    how="left"
+)
 
-    objective["injury_next_7d"] = labels
-    return objective
+# -----------------------
+# CREATE LABEL
+# -----------------------
+merged["injury_flag"] = merged["type"].notna().astype(int)
 
-# ----------------------------
-# MAIN
-# ----------------------------
-def main():
-    print("Loading subjective...")
-    subjective = load_subjective()
+print("\nFinal shape:", merged.shape)
+print("\nInjury rate:", merged["injury_flag"].mean())
 
-    print("\nProcessing objective...")
-    objective = process_objective()
+# -----------------------
+# SAVE FINAL DATASET
+# -----------------------
+merged.to_csv("final_dataset.csv", index=False)
 
-    print("\nCreating labels...")
-    dataset = create_labels(objective, subjective)
-
-    dataset = dataset.fillna(0)
-
-    print("\nFinal shape:", dataset.shape)
-
-    dataset.to_csv("soccer_mon_ml_ready.csv", index=False)
-
-    print("Saved dataset")
-
-if __name__ == "__main__":
-    main()
+print("Done")
