@@ -8,57 +8,63 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report
 
 OBJECTIVE_ROOT = "/scratch/user/u.mm342941/objective-TeamA-2020"
-SUBJECTIVE_PATH = "subjective"
+SUBJECTIVE_ROOT = "/scratch/user/u.mm342941/subjective"
 
 FUTURE_DAYS = 7
-
+MAX_PARQUET_FILES = 800
 
 def parse_date(df, col):
     df[col] = pd.to_datetime(df[col], format="%d.%m.%Y", errors="coerce")
     return df
 
-
 def load_subjective():
-    injury = pd.read_csv(f"{SUBJECTIVE_PATH}/injury/injury.csv")
-    perf = pd.read_csv(f"{SUBJECTIVE_PATH}/game-performance/performance.csv")
-    illness = pd.read_csv(f"{SUBJECTIVE_PATH}/illness/illness.csv")
+    injury_path = os.path.join(SUBJECTIVE_ROOT, "injury/injury.csv")
+    illness_path = os.path.join(SUBJECTIVE_ROOT, "illness/illness.csv")
+    perf_path = os.path.join(SUBJECTIVE_ROOT, "game-performance/performance.csv")
+
+    print("Loading subjective files")
+    print(injury_path)
+    print(illness_path)
+    print(perf_path)
+
+    injury = pd.read_csv(injury_path)
+    illness = pd.read_csv(illness_path)
+    perf = pd.read_csv(perf_path)
 
     injury = parse_date(injury, "timestamp")
-    perf = parse_date(perf, "timestamp")
     illness = parse_date(illness, "timestamp")
+    perf = parse_date(perf, "timestamp")
 
     injury["injury"] = 1
-    perf["injury"] = 0
     illness["injury"] = 0
+    perf["injury"] = 0
 
-    injury = injury.rename(columns={"type": "injury_detail"})
-    perf = perf.rename(columns={"team_performance": "team_perf"})
+    injury = injury[["player_name", "timestamp", "injury"]]
+    illness = illness[["player_name", "timestamp", "injury"]]
+    perf = perf[["player_name", "timestamp", "injury"]]
 
-    df = pd.concat([
-        injury[["player_name", "timestamp", "injury"]],
-        perf[["player_name", "timestamp", "injury"]],
-        illness[["player_name", "timestamp", "injury"]]
-    ])
-
+    df = pd.concat([injury, illness, perf], ignore_index=True)
     df = df.dropna(subset=["timestamp"])
 
-    print("Subjective rows:", len(df))
-    print("Unique players:", df["player_name"].nunique())
-    print("Date range:", df["timestamp"].min(), "to", df["timestamp"].max())
+    df = df[df["player_name"].str.contains("TeamA", na=False)]
 
-    return df
+    print("Subjective rows after TeamA filter:", len(df))
+    print("Unique players subjective:", df["player_name"].nunique())
+    print("Subjective date range:", df["timestamp"].min(), "to", df["timestamp"].max())
 
+    return df[df["injury"] == 1]
 
 def load_objective():
     files = glob.glob(os.path.join(OBJECTIVE_ROOT, "**/*.parquet"), recursive=True)
+    print("Found parquet files:", len(files))
 
     rows = []
 
-    for i, f in enumerate(files[:800]):
+    for i, f in enumerate(files[:MAX_PARQUET_FILES]):
         try:
             df = pd.read_parquet(f)
 
-            if "timestamp" not in df.columns:
+            if "timestamp" not in df.columns or "player_name" not in df.columns:
                 continue
 
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -66,82 +72,79 @@ def load_objective():
 
             rows.append(df)
 
-        except:
+        except Exception as e:
             continue
 
     if len(rows) == 0:
-        raise ValueError("No valid objective data found")
+        raise ValueError("No valid objective data loaded")
 
     obj = pd.concat(rows, ignore_index=True)
 
-    print("Objective rows:", len(obj))
+    print("Objective rows loaded:", len(obj))
+    print("Objective players:", obj["player_name"].nunique())
+    print("Objective date range:", obj["date"].min(), "to", obj["date"].max())
 
     return obj
 
-
 def aggregate_daily(obj):
     num_cols = ["speed", "heart_rate", "accl_x", "accl_y", "accl_z"]
+    num_cols = [c for c in num_cols if c in obj.columns]
 
-    agg = obj.groupby(["player_name", "date"])[num_cols].agg(["mean", "max"])
+    agg = (
+        obj
+        .groupby(["player_name", "date"])[num_cols]
+        .agg(["mean", "max"])
+    )
+
     agg.columns = ["_".join(c) for c in agg.columns]
-
     agg = agg.reset_index()
 
+    print("Daily objective rows:", len(agg))
     return agg
-
 
 def impute(df):
     for c in df.columns:
-        if c in ["player_name", "date"]:
+        if c in ["player_name", "date", "label"]:
             continue
-
-        df[c] = df.groupby("player_name")[c].transform(
-            lambda x: x.fillna(x.mean())
-        )
+        df[c] = df.groupby("player_name")[c].transform(lambda x: x.fillna(x.mean()))
 
     df = df.fillna(df.median(numeric_only=True))
-
     return df
 
-
 def build_labels(obj_daily, injuries):
+    obj_daily = obj_daily.sort_values(["player_name", "date"])
     injuries = injuries.sort_values("timestamp")
-
-    obj_daily["label"] = 0
 
     injury_map = {}
 
     for _, row in injuries.iterrows():
         pid = row["player_name"]
-        dt = row["timestamp"].date()
-
-        if pid not in injury_map:
-            injury_map[pid] = []
-
-        injury_map[pid].append(dt)
+        d = row["timestamp"].date()
+        injury_map.setdefault(pid, []).append(d)
 
     labels = []
 
     for _, row in obj_daily.iterrows():
         pid = row["player_name"]
         d = row["date"]
-
         label = 0
 
         if pid in injury_map:
-            for inj in injury_map[pid]:
-                if 0 <= (inj - d).days <= FUTURE_DAYS:
+            for inj_date in injury_map[pid]:
+                delta = (inj_date - d).days
+                if 0 <= delta <= FUTURE_DAYS:
                     label = 1
                     break
+
 
         labels.append(label)
 
     obj_daily["label"] = labels
 
-    print("Positive rate:", obj_daily["label"].mean())
+    print("Positive samples:", obj_daily["label"].sum())
+    print("Positive rate:", round(obj_daily["label"].mean(), 4))
 
     return obj_daily
-
 
 def run_model(df):
     df = df.sort_values(["player_name", "date"])
@@ -152,41 +155,44 @@ def run_model(df):
     y = df["label"]
 
     if y.nunique() < 2:
-        print("ERROR: Only one class present. Cannot train model")
+        print("Only one class present, cannot train model")
         return
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+        X, y, test_size=0.2, stratify=y, random_state=42
     )
 
     model = RandomForestClassifier(
-        n_estimators=100,
+        n_estimators=200,
         class_weight="balanced",
-        random_state=42
+        random_state=42,
+        n_jobs=-1
     )
 
     model.fit(X_train, y_train)
-
     y_pred = model.predict(X_test)
 
-    print(classification_report(y_test, y_pred))
-
+    print(classification_report(y_test, y_pred, zero_division=0))
 
 def main():
     injuries = load_subjective()
-
     obj = load_objective()
-
     obj_daily = aggregate_daily(obj)
 
-    obj_daily = impute(obj_daily)
+    earliest = obj_daily["date"].min()
+    latest = obj_daily["date"].max()
+    injuries = injuries[
+        (injuries["timestamp"].dt.date >= earliest) &
+        (injuries["timestamp"].dt.date <= latest)
+    ]
+
+    print("Injuries overlapping objective window:", len(injuries))
 
     obj_daily = build_labels(obj_daily, injuries)
+    obj_daily = impute(obj_daily)
 
-    print("Final shape:", obj_daily.shape)
-
+    print("Final dataset shape:", obj_daily.shape)
     run_model(obj_daily)
-
 
 if __name__ == "__main__":
     main()
