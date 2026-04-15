@@ -3,10 +3,6 @@ import numpy as np
 import glob
 import os
 
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
-
 OBJECTIVE_PATH = "/scratch/user/u.mm342941/objective-TeamA-2020/**/*.parquet"
 
 SUBJECTIVE_PATHS = {
@@ -15,19 +11,16 @@ SUBJECTIVE_PATHS = {
     "illness": "subjective/illness/illness.csv"
 }
 
-# -------------------------
-# CLEAN PLAYER IDS
-# -------------------------
+WINDOW_DAYS = 7
+
 def clean_player_name(name):
     if pd.isna(name):
         return name
-    name = str(name)
-    name = name.replace("TeamA-TeamA-", "TeamA-")
-    return name
+    return str(name).replace("TeamA-TeamA-", "TeamA-")
 
-# -------------------------
-# LOAD SUBJECTIVE DATA
-# -------------------------
+# ----------------------------
+# SUBJECTIVE
+# ----------------------------
 def load_subjective():
     dfs = []
 
@@ -36,10 +29,8 @@ def load_subjective():
             print("Missing:", path)
             continue
 
-        print("\nLoading subjective:", key)
+        print("\nLoading:", key)
         df = pd.read_csv(path)
-
-        df["player_name"] = df["player_name"].apply(clean_player_name)
 
         df["timestamp"] = pd.to_datetime(
             df["timestamp"],
@@ -49,31 +40,27 @@ def load_subjective():
 
         df = df.dropna(subset=["timestamp"])
         df["date"] = df["timestamp"].dt.floor("D")
+        df["player_name"] = df["player_name"].apply(clean_player_name)
 
         dfs.append(df)
 
-        print("Rows:", len(df))
+    combined = pd.concat(dfs, ignore_index=True)
 
-    full = pd.concat(dfs, ignore_index=True)
+    print("Subjective rows:", len(combined))
+    return combined
 
-    print("\nSubjective rows:", len(full))
-    print("Unique players:", full["player_name"].nunique())
+# ----------------------------
+# OBJECTIVE (MEMORY SAFE)
+# ----------------------------
+def process_objective():
+    files = glob.glob(OBJECTIVE_PATH, recursive=True)
 
-    return full
+    print("Total files:", len(files))
 
-# -------------------------
-# LOAD OBJECTIVE DATA
-# -------------------------
-def load_objective():
-    files = sorted(glob.glob(OBJECTIVE_PATH, recursive=True))
-
-    print("\nTotal objective files:", len(files))
-
-    dfs = []
+    aggregated_rows = []
 
     for i, f in enumerate(files):
-        if i % 100 == 0:
-            print(f"Processing file {i}/{len(files)}")
+        print(f"[{i+1}/{len(files)}]")
 
         try:
             df = pd.read_parquet(f)
@@ -81,56 +68,49 @@ def load_objective():
             if "time" not in df.columns:
                 continue
 
+            df["date"] = pd.to_datetime(df["time"], unit="s").dt.floor("D")
             df["player_name"] = df["player_name"].apply(clean_player_name)
 
-            df["date"] = pd.to_datetime(df["time"], unit="s").dt.floor("D")
+            # compute features
+            df["acc_mag"] = np.sqrt(
+                df["accl_x"]**2 + df["accl_y"]**2 + df["accl_z"]**2
+            )
 
-            dfs.append(df)
+            agg = df.groupby(["player_name", "date"]).agg({
+                "speed": ["mean", "max"],
+                "heart_rate": ["mean", "max"],
+                "acc_mag": "mean"
+            }).reset_index()
 
-        except:
-            continue
+            agg.columns = [
+                "player_name", "date",
+                "speed_mean", "speed_max",
+                "heart_rate_mean", "heart_rate_max",
+                "acc_mag_mean"
+            ]
 
-    full = pd.concat(dfs, ignore_index=True)
+            aggregated_rows.append(agg)
 
-    print("\nObjective shape:", full.shape)
-    print("Date range:", full["date"].min(), "to", full["date"].max())
+            # IMPORTANT: delete raw df immediately
+            del df
 
-    return full
+        except Exception as e:
+            print("Skipping:", f)
+            print(e)
 
-# -------------------------
-# FEATURE ENGINEERING
-# -------------------------
-def build_features(df):
-    df = df.sort_values(["player_name", "date"])
+    combined = pd.concat(aggregated_rows, ignore_index=True)
 
-    # rolling features per player
-    df["speed_mean_3d"] = df.groupby("player_name")["speed"].transform(
-        lambda x: x.rolling(3, min_periods=1).mean()
-    )
+    print("Objective rows:", len(combined))
+    return combined
 
-    df["speed_std_3d"] = df.groupby("player_name")["speed"].transform(
-        lambda x: x.rolling(3, min_periods=1).std()
-    )
-
-    df["hr_mean_3d"] = df.groupby("player_name")["heart_rate"].transform(
-        lambda x: x.rolling(3, min_periods=1).mean()
-    )
-
-    df["accl_mag"] = np.sqrt(df["accl_x"]**2 + df["accl_y"]**2 + df["accl_z"]**2)
-
-    df["accl_mean_3d"] = df.groupby("player_name")["accl_mag"].transform(
-        lambda x: x.rolling(3, min_periods=1).mean()
-    )
-
-    return df
-
-# -------------------------
-# CREATE INJURY LABEL
-# -------------------------
+# ----------------------------
+# LABELING
+# ----------------------------
 def create_labels(objective, subjective):
-    injury = subjective[subjective["type"].notna()].copy()
+    injury = subjective[subjective["type"].notna()]
 
-    injury_dates = injury.groupby("player_name")["date"].apply(list).to_dict()
+    objective = objective.sort_values(["player_name", "date"])
+    injury = injury.sort_values(["player_name", "date"])
 
     labels = []
 
@@ -138,91 +118,37 @@ def create_labels(objective, subjective):
         player = row["player_name"]
         date = row["date"]
 
-        future_injury = False
+        future = injury[
+            (injury["player_name"] == player) &
+            (injury["date"] > date) &
+            (injury["date"] <= date + pd.Timedelta(days=WINDOW_DAYS))
+        ]
 
-        if player in injury_dates:
-            for d in injury_dates[player]:
-                if date < d <= date + pd.Timedelta(days=7):
-                    future_injury = True
-                    break
-
-        labels.append(int(future_injury))
+        labels.append(1 if len(future) > 0 else 0)
 
     objective["injury_next_7d"] = labels
-
     return objective
 
-# -------------------------
-# BUILD MODEL DATASET
-# -------------------------
-def build_dataset(obj, sub):
-    obj = build_features(obj)
-    obj = create_labels(obj, sub)
-
-    features = [
-        "speed",
-        "heart_rate",
-        "accl_x",
-        "accl_y",
-        "accl_z",
-        "speed_mean_3d",
-        "speed_std_3d",
-        "hr_mean_3d",
-        "accl_mean_3d"
-    ]
-
-    obj = obj.dropna(subset=features + ["injury_next_7d"])
-
-    X = obj[features]
-    y = obj["injury_next_7d"]
-
-    return X, y
-
-# -------------------------
-# TRAIN MODEL
-# -------------------------
-def train_model(X, y):
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y,
-        test_size=0.2,
-        random_state=42,
-        stratify=y
-    )
-
-    model = RandomForestClassifier(
-        n_estimators=200,
-        max_depth=8,
-        random_state=42
-    )
-
-    model.fit(X_train, y_train)
-
-    preds = model.predict(X_test)
-
-    print("\nMODEL RESULTS")
-    print(classification_report(y_test, preds))
-
-    return model
-
-# -------------------------
+# ----------------------------
 # MAIN
-# -------------------------
+# ----------------------------
 def main():
     print("Loading subjective...")
     subjective = load_subjective()
 
-    print("\nLoading objective...")
-    objective = load_objective()
+    print("\nProcessing objective...")
+    objective = process_objective()
 
-    print("\nBuilding dataset...")
-    X, y = build_dataset(objective, subjective)
+    print("\nCreating labels...")
+    dataset = create_labels(objective, subjective)
 
-    print("\nFinal dataset size:", X.shape)
+    dataset = dataset.fillna(0)
 
-    print("\nTraining model...")
-    model = train_model(X, y)
+    print("\nFinal shape:", dataset.shape)
 
-    print("\nDone")
+    dataset.to_csv("soccer_mon_ml_ready.csv", index=False)
+
+    print("Saved dataset")
 
 if __name__ == "__main__":
     main()
