@@ -2,196 +2,272 @@ import os
 import glob
 import pandas as pd
 import numpy as np
-from collections import Counter
+
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-OBJECTIVE_ROOT = "/scratch/user/u.mm342941/objective-TeamA-2020"
+
 SUBJECTIVE_ROOT = os.path.join(BASE_DIR, "subjective")
+OBJECTIVE_ROOT = "/scratch/user/u.mm342941/objective-TeamA-2020"
 
-MAX_FILES = 200  # keep small for debugging
+START_DATE = "2020-06-01"
+END_DATE = "2020-12-31"
+
+FUTURE_DAYS = 7
+MAX_FILES = 1000
 
 
-# ---------------- SUBJECTIVE LOADING (SAFE) ----------------
+# ---------------------------
+# SUBJECTIVE DATA
+# ---------------------------
 def load_subjective():
+    print("\nLoading subjective data")
+
     injury_path = os.path.join(SUBJECTIVE_ROOT, "injury", "injury.csv")
     illness_path = os.path.join(SUBJECTIVE_ROOT, "illness", "illness.csv")
+    perf_path = os.path.join(SUBJECTIVE_ROOT, "game-performance", "performance.csv")
 
-    def safe_read(path):
-        if not os.path.exists(path):
-            print("Missing subjective file:", path)
-            return None
-        return pd.read_csv(path)
+    injury = pd.read_csv(injury_path)
+    illness = pd.read_csv(illness_path)
+    perf = pd.read_csv(perf_path)
 
-    injury = safe_read(injury_path)
-    illness = safe_read(illness_path)
+    def parse(df):
+        df["timestamp"] = pd.to_datetime(df["timestamp"], dayfirst=True, errors="coerce")
+        return df.dropna(subset=["timestamp"])
 
-    if injury is None:
-        raise ValueError("No injury file found")
+    injury = parse(injury)
+    illness = parse(illness)
+    perf = parse(perf)
 
-    injury["timestamp"] = pd.to_datetime(
-        injury["timestamp"], format="%d.%m.%Y", errors="coerce"
-    )
+    injury["event"] = 1
+    illness["event"] = 0
+    perf["event"] = 0
 
-    injury = injury.dropna(subset=["timestamp"])
+    df = pd.concat([
+        injury[["player_name", "timestamp", "event"]],
+        illness[["player_name", "timestamp", "event"]],
+        perf[["player_name", "timestamp", "event"]],
+    ])
 
-    print("\nSUBJECTIVE SUMMARY")
-    print("Injury rows:", len(injury))
-    print("Unique players:", injury["player_name"].nunique())
-    print("Date range:", injury["timestamp"].min(), "to", injury["timestamp"].max())
+    # filter TeamA only (optional adjust if needed)
+    df = df[df["player_name"].str.contains("TeamA", na=False)]
 
-    return injury
+    # IMPORTANT FILTER WINDOW
+    df = df[
+        (df["timestamp"] >= START_DATE) &
+        (df["timestamp"] <= END_DATE)
+    ]
+
+    print("Subjective rows:", len(df))
+    print("Injury events:", df["event"].sum())
+    print("Players:", df["player_name"].nunique())
+    print("Date range:", df["timestamp"].min(), "to", df["timestamp"].max())
+
+    return df[df["event"] == 1]
 
 
-# ---------------- OBJECTIVE DIAGNOSTICS ----------------
-def inspect_parquet_structure(files):
-    column_counter = Counter()
-    sample_schemas = []
-    timestamp_candidates = Counter()
-
-    valid_files = 0
-
-    for i, f in enumerate(files[:MAX_FILES]):
+# ---------------------------
+# OBJECTIVE DATA
+# ---------------------------
+def extract_date_from_path(path):
+    parts = path.split(os.sep)
+    for p in parts:
         try:
-            df = pd.read_parquet(f)
-        except Exception as e:
-            print("READ ERROR:", f, e)
-            continue
-
-        valid_files += 1
-
-        cols = list(df.columns)
-        column_counter.update(cols)
-
-        sample_schemas.append(cols)
-
-        # detect possible timestamp columns
-        for c in cols:
-            if "time" in c.lower() or "date" in c.lower():
-                timestamp_candidates[c] += 1
-
-        if i < 3:
-            print("\nSAMPLE FILE:", f)
-            print("Columns:", cols)
-            print(df.head(2))
-
-    print("\nOBJECTIVE STRUCTURE SUMMARY")
-    print("Valid files read:", valid_files)
-
-    print("\nMost common columns:")
-    for k, v in column_counter.most_common(20):
-        print(k, ":", v)
-
-    print("\nPossible timestamp columns:")
-    for k, v in timestamp_candidates.most_common():
-        print(k, ":", v)
-
-    return column_counter, timestamp_candidates
-
-
-# ---------------- OBJECTIVE LOADING (NON-DESTRUCTIVE) ----------------
-def load_objective_debug():
-    files = glob.glob(os.path.join(OBJECTIVE_ROOT, "**/*.parquet"), recursive=True)
-
-    print("\nTOTAL PARQUET FILES FOUND:", len(files))
-
-    column_counter, timestamp_candidates = inspect_parquet_structure(files)
-
-    return files, column_counter, timestamp_candidates
-
-
-# ---------------- CHECK IF ANY USABLE DATA EXISTS ----------------
-def try_extract_any_objective(files):
-    usable_rows = []
-    schema_fail = 0
-
-    for i, f in enumerate(files[:MAX_FILES]):
-        try:
-            df = pd.read_parquet(f)
+            return pd.to_datetime(p).date()
         except:
             continue
+    return None
 
-        # try to normalize timestamp
-        ts_col = None
-        for c in df.columns:
-            if c.lower() in ["timestamp", "time", "datetime", "date"]:
-                ts_col = c
-                break
 
-        if ts_col is None:
-            schema_fail += 1
+def load_objective():
+    print("\nLoading objective data")
+
+    files = glob.glob(os.path.join(OBJECTIVE_ROOT, "**/*.parquet"), recursive=True)
+    print("Total parquet files:", len(files))
+
+    dfs = []
+
+    for i, f in enumerate(files[:MAX_FILES]):
+        if i % 200 == 0:
+            print(f"[{i}/{len(files)}] Processing")
+
+        try:
+            df = pd.read_parquet(f)
+
+            if "time" not in df.columns:
+                continue
+
+            file_date = extract_date_from_path(f)
+            if file_date is None:
+                continue
+
+            df["date"] = file_date
+
+            # FIX: combine folder date + time column
+            df["timestamp"] = pd.to_datetime(
+                df["date"].astype(str) + " " + df["time"].astype(str),
+                errors="coerce"
+            )
+
+            df = df.dropna(subset=["timestamp"])
+
+            dfs.append(df)
+
+        except Exception:
             continue
 
-        df["timestamp"] = pd.to_datetime(df[ts_col], errors="coerce")
-        df = df.dropna(subset=["timestamp"])
+    if len(dfs) == 0:
+        raise ValueError("No objective data loaded. Check parquet structure or path parsing.")
 
-        # detect player column
-        player_col = None
-        for c in df.columns:
-            if "player" in c.lower() or "athlete" in c.lower():
-                player_col = c
-                break
+    obj = pd.concat(dfs, ignore_index=True)
 
-        if player_col is None:
-            continue
-
-        df = df.rename(columns={player_col: "player_name"})
-
-        if "speed" not in df.columns and "heart_rate" not in df.columns:
-            continue
-
-        df["date"] = df["timestamp"].dt.date
-
-        usable_rows.append(df[["player_name", "date"]])
-
-    if len(usable_rows) == 0:
-        print("\nNO USABLE OBJECTIVE DATA FOUND")
-        print("Files missing timestamp schema:", schema_fail)
-        return None
-
-    obj = pd.concat(usable_rows, ignore_index=True)
-
-    print("\nPOTENTIAL OBJECTIVE DATA FOUND")
+    print("\nObjective summary")
     print("Rows:", len(obj))
     print("Players:", obj["player_name"].nunique())
-    print("Date range:", obj["date"].min(), "to", obj["date"].max())
+    print("Date range:", obj["timestamp"].min(), "to", obj["timestamp"].max())
 
     return obj
 
 
-# ---------------- OVERLAP CHECK ----------------
-def check_overlap(obj, injuries):
-    if obj is None:
-        print("\nCANNOT CHECK OVERLAP: NO OBJECTIVE DATA")
+# ---------------------------
+# AGGREGATION
+# ---------------------------
+def aggregate_daily(obj):
+    print("\nAggregating daily workload")
+
+    obj["date"] = obj["timestamp"].dt.date
+
+    features = [c for c in ["speed", "heart_rate", "accl_x", "accl_y", "accl_z"] if c in obj.columns]
+
+    daily = obj.groupby(["player_name", "date"])[features].mean().reset_index()
+
+    print("Daily rows:", len(daily))
+    return daily
+
+
+# ---------------------------
+# LABELING
+# ---------------------------
+def build_labels(daily, injuries):
+    print("\nBuilding labels")
+
+    injuries["date"] = injuries["timestamp"].dt.date
+
+    injury_map = injuries.groupby("player_name")["date"].apply(list).to_dict()
+
+    labels = []
+
+    for _, row in daily.iterrows():
+        pid = row["player_name"]
+        d = row["date"]
+
+        label = 0
+
+        if pid in injury_map:
+            for inj in injury_map[pid]:
+                delta = (inj - d).days
+                if 0 <= delta <= FUTURE_DAYS:
+                    label = 1
+                    break
+
+        labels.append(label)
+
+    daily["label"] = labels
+
+    print("Positive samples:", daily["label"].sum())
+    print("Positive rate:", round(daily["label"].mean(), 4))
+
+    return daily
+
+
+# ---------------------------
+# IMPUTATION
+# ---------------------------
+def impute(df):
+    print("\nImputing missing values")
+
+    for c in df.columns:
+        if c in ["player_name", "date", "label"]:
+            continue
+
+        df[c] = df.groupby("player_name")[c].transform(lambda x: x.fillna(x.mean()))
+
+    df = df.fillna(df.median(numeric_only=True))
+    return df
+
+
+# ---------------------------
+# MODEL
+# ---------------------------
+def run_model(df):
+    print("\nTraining model")
+
+    feature_cols = [c for c in df.columns if c not in ["player_name", "date", "label"]]
+
+    X = df[feature_cols]
+    y = df["label"]
+
+    if y.nunique() < 2:
+        print("Only one class present")
         return
 
-    obj_dates = set(obj["date"].unique())
-    inj_dates = set(injuries["timestamp"].dt.date.unique())
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, stratify=y, random_state=42
+    )
 
-    overlap = obj_dates.intersection(inj_dates)
+    model = RandomForestClassifier(
+        n_estimators=200,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1
+    )
 
-    print("\nOVERLAP ANALYSIS")
-    print("Objective unique dates:", len(obj_dates))
-    print("Injury unique dates:", len(inj_dates))
-    print("Overlapping dates:", len(overlap))
+    model.fit(X_train, y_train)
+    preds = model.predict(X_test)
 
-    if len(overlap) == 0:
-        print("\nCRITICAL ISSUE: NO TEMPORAL OVERLAP")
-        print("This means model training is impossible with current split.")
-    else:
-        print("Overlap exists → modeling possible")
+    print(classification_report(y_test, preds, zero_division=0))
 
 
-# ---------------- MAIN ----------------
+# ---------------------------
+# SAMPLE OUTPUT
+# ---------------------------
+def show_sample(df):
+    print("\nSample athlete timeline")
+
+    sample_player = df["player_name"].iloc[0]
+
+    sample = df[df["player_name"] == sample_player].sort_values("date")
+
+    print("\nPlayer:", sample_player)
+    print(sample.head(20))
+
+
+# ---------------------------
+# MAIN
+# ---------------------------
 def main():
     injuries = load_subjective()
+    obj = load_objective()
 
-    files, col_count, ts_candidates = load_objective_debug()
+    daily = aggregate_daily(obj)
 
-    obj = try_extract_any_objective(files)
+    injuries = injuries[
+        (injuries["timestamp"] >= START_DATE) &
+        (injuries["timestamp"] <= END_DATE)
+    ]
 
-    check_overlap(obj, injuries)
+    print("\nFiltered injuries:", len(injuries))
 
-    print("\nDIAGNOSTIC COMPLETE")
+    daily = build_labels(daily, injuries)
+    daily = impute(daily)
+
+    print("\nFinal dataset shape:", daily.shape)
+
+    show_sample(daily)
+
+    run_model(daily)
 
 
 if __name__ == "__main__":
